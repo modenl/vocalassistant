@@ -1,0 +1,12 @@
+{
+  "name": "vocallab",
+  "private": true,
+  "type": "module",
+  "description": "Browser-based singing feedback without a score: five dimensions (pitch, rhythm, breath, technique, expression) from pitch/level/onsets; deterministic beginner lessons",
+  "scripts": {
+    "start": "python3 tools/serve.py 8765",
+    "test": "node tests/pitch.test.mjs && node tests/metrics.test.mjs && node tests/lessons.test.mjs && node tests/i18n.test.mjs && node tests/real.test.mjs",
+    "build": "node tools/build.mjs",
+    "deploy": "node tools/build.mjs && npx --yes wrangler@4 deploy"
+  }
+}

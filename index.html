@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>声乐练习台 VocalLab</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header class="app">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1c2436"/><path d="M5 17h3l2-7 3 14 3-18 3 16 2-8 2 3h4" fill="none" stroke="#3987e5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span data-en="VocalLab">声乐练习台</span> <span class="muted" data-hide-en style="font-weight:400;font-size:12px">VocalLab</span>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="live" class="active" data-en="Sing &amp; check">唱一段看问题</button>
+      <button data-tab="lessons" data-en="Lessons">基础课程</button>
+      <button data-tab="history" data-en="History">历史记录</button>
+      <button data-tab="settings" data-en="Settings">设置</button>
+    </nav>
+    <div class="spacer"></div>
+    <label class="muted" style="font-size:12px"><span data-en="Voice">声部</span> <select id="voiceType"></select></label>
+    <select id="langSel" class="lang-sel" aria-label="语言 / Language" title="语言 / Language"></select>
+  </header>
+
+  <main>
+    <!-- ================= LIVE ================= -->
+    <section class="tab active" id="tab-live">
+      <div class="live-controls">
+        <button class="btn primary" id="btnStart" data-en="● Start singing">● 开始唱</button>
+        <button class="btn" id="btnFile" data-en="Import a recording">导入录音</button>
+        <input type="file" id="fileInput" accept="audio/*" class="hidden" />
+        <span class="timer" id="timer">0:00</span>
+        <div class="level" title="输入音量" data-en-title="Input level"><div id="level"></div></div>
+        <span class="status" id="status" data-en="Press “Start singing” and allow the microphone. Sing a song or an exercise; afterwards you’ll see what to practise most.">点“开始唱”，允许麦克风。唱一首歌或一段练习，结束后会告诉你最需要练什么。</span>
+      </div>
+      <div id="scoreProg"></div>
+
+      <div class="live-grid">
+        <div class="panel l-track">
+          <div class="ph"><h3 data-en="Pitch trace">音高轨迹</h3><span class="sub" data-en="last 12 s">最近 12 秒</span>
+            <div class="legend" style="margin-left:auto">
+              <span><span class="sw" style="background:#2fbf71"></span><i data-en="in tune">准</i></span>
+              <span><span class="sw" style="background:#f0b429"></span><i data-en="slightly off">略偏</i></span>
+              <span><span class="sw" style="background:#ef5a5a"></span><i data-en="off">不准</i></span>
+              <span><span class="sw" style="background:#7c8698"></span><i data-en="glide">滑音/过渡</i></span>
+              <span>⚡ <i data-en="break">断档</i></span>
+              <span><b style="color:#f0b429">↘</b> <i data-en="phrase end sank">句尾掉音</i></span>
+              <span><b style="color:#f0b429">↗</b> <i data-en="scoop">挑音</i></span>
+            </div></div>
+          <canvas class="viz" id="trackCanvas" style="height:300px"></canvas>
+        </div>
+        <div class="panel l-now">
+          <div class="ph"><h3 data-en="Now">现在</h3></div>
+          <div class="now-note" id="noteName">—</div>
+          <div class="now-cents" id="noteCents">&nbsp;</div>
+          <canvas class="viz" id="centsCanvas" style="height:56px"></canvas>
+          <div class="muted" style="font-size:12px;margin-top:6px" data-en="Centre = in tune; left = flat, right = sharp. A cappella, notes are judged against your own overall tuning (are the notes in tune with each other).">中间 = 准；往左 = 偏低，往右 = 偏高。清唱时按你自己的整体音高判断（音与音之间准不准）。</div>
+          <div class="muted" id="tuneNote" style="font-size:12px"></div>
+          <div class="now-range" id="rangeText"></div>
+        </div>
+      </div>
+
+      <div class="ph" style="margin-top:14px"><h3 data-en="Five-dimension score">五维评分</h3><span class="sub" data-en="Pitch · Rhythm · Breath · Technique · Expression — updated as you sing, no original recording or score needed; every item tells you what to do next">音准 · 节奏 · 气息 · 技巧 · 表现力 —— 边唱边更新，不需要原唱或乐谱；每一项都告诉你下一步做什么</span></div>
+      <div id="mcards"></div>
+    </section>
+
+    <!-- ================= LESSONS ================= -->
+    <section class="tab" id="tab-lessons"></section>
+
+    <!-- ================= HISTORY ================= -->
+    <section class="tab" id="tab-history"></section>
+
+    <!-- ================= SETTINGS ================= -->
+    <section class="tab" id="tab-settings"></section>
+
+    <p class="disclaimer" data-en="Note: judgements use only the pitch, loudness and note timing picked up by the microphone — the parts that can be measured reliably; a cappella works best (an accompaniment interferes). Without a score, a wrong note or a whole beat too long that is still sung steadily can’t be detected. Timbre, vocal registers (chest / head / mix) and emotional expression are for your teacher’s and listeners’ ears. If hoarseness or pain persists, see a doctor.">说明：只根据麦克风里的音高、音量和音头的时间做判断，这是能测得准的部分；清唱效果最好（伴奏声会干扰判断）。没有乐谱，所以唱错了音或整拍唱错、但唱得很稳，是测不出来的。音色、发声机制（胸声 / 头声 / 混声）、感情表达请以老师和听众的耳朵为准。如有持续声音嘶哑、疼痛，请就医。</p>
+  </main>
+  <div id="tooltip" class="tooltip"></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

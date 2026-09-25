@@ -1,0 +1,11 @@
+# Cloudflare Workers static-assets deployment of dist/ (built by tools/build.mjs).
+# Deploy: npm run deploy
+name = "vocallab"
+compatibility_date = "2026-09-01"
+
+# Custom subdomain (zone postagi.co.uk is on this account); `wrangler deploy`
+# creates the DNS record and certificate automatically.
+routes = [{ pattern = "vocal.postagi.co.uk", custom_domain = true }]
+
+[assets]
+directory = "./dist"
