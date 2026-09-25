@@ -1,5 +1,5 @@
 // Node helpers around the shared synthesizer (js/audio/synth.js).
-export { synth, hz, steady, VOWELS } from './synth-core.mjs';
+export { synth, hz, steady, VOWELS } from '../js/audio/synth.js';
 
 export function wav16(samples, sr) {
   const n = samples.length;

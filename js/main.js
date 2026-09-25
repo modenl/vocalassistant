@@ -5,6 +5,7 @@ import { L, getLang, detectLang } from './i18n.js';
 import { LiveView } from './ui/live.js';
 import { HistoryView } from './ui/history.js';
 import { LessonsView } from './ui/lessons.js';
+import { GymView } from './ui/gym.js';
 import { renderSettings } from './ui/settings.js';
 
 const app = {
@@ -20,6 +21,7 @@ const app = {
       document.getElementById('voiceType').value = this.settings.voiceType;
       if (!this.live.engine.running) this.live.drawIdle();
       if (this.tab === 'lessons') this.lessons.lesson ? this.lessons.renderLesson() : this.lessons.show();
+      if (this.tab === 'gym') this.gym.show();
     }
   },
 
@@ -31,7 +33,9 @@ const app = {
     document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === `tab-${name}`));
     if (name !== 'lessons') this.lessons.stopRunner();
+    if (name !== 'gym') await this.gym.stop();
     if (name === 'lessons') this.lessons.show(arg);
+    if (name === 'gym') this.gym.show();
     if (name === 'history') await this.history.show(arg);
     if (name === 'settings') await renderSettings(document.getElementById('tab-settings'), this);
     if (name === 'live' && !this.live.engine.running) this.live.drawIdle();
@@ -66,6 +70,7 @@ function init() {
   app.live = new LiveView(app);
   app.history = new HistoryView(app, document.getElementById('tab-history'));
   app.lessons = new LessonsView(app, document.getElementById('tab-lessons'));
+  app.gym = new GymView(app, document.getElementById('tab-gym'));
   app.live.init();
   document.getElementById('tabs').onclick = (e) => {
     const b = e.target.closest('button');

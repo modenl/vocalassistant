@@ -91,16 +91,17 @@ export class PitchTrack {
         ctx.fillText(midiName(m), x0 - 6, Y(m));
       }
     }
-    // target bands for lessons: the passing zone (±50 cents)
-    // (active = the note to sing next: drawn stronger)
+    // target bands: the passing zone (g.tol cents either side, default ±50)
+    // (active = the note to sing next: drawn stronger; ref = heard only, grey)
     const anyActive = (opts.targets || []).some((g) => g.active);
     for (const g of opts.targets || []) {
-      const dim = anyActive && !g.active;
-      ctx.fillStyle = g.active ? 'rgba(47,191,113,0.28)' : dim ? 'rgba(47,191,113,0.06)' : 'rgba(47,191,113,0.14)';
-      ctx.fillRect(x0, Y(g.midi + 0.5), pw, Y(g.midi - 0.5) - Y(g.midi + 0.5));
-      ctx.strokeStyle = dim ? 'rgba(47,191,113,0.35)' : 'rgba(47,191,113,0.8)'; ctx.setLineDash([6, 4]);
+      const dim = anyActive && !g.active, hw = (g.tol ?? 50) / 100;
+      const [r, gg, b] = g.ref ? [124, 134, 152] : [47, 191, 113];
+      ctx.fillStyle = `rgba(${r},${gg},${b},${g.active ? 0.28 : dim ? 0.06 : 0.14})`;
+      ctx.fillRect(x0, Y(g.midi + hw), pw, Y(g.midi - hw) - Y(g.midi + hw));
+      ctx.strokeStyle = `rgba(${r},${gg},${b},${dim ? 0.35 : 0.8})`; ctx.setLineDash([6, 4]);
       ctx.beginPath(); ctx.moveTo(x0, Y(g.midi)); ctx.lineTo(x1, Y(g.midi)); ctx.stroke(); ctx.setLineDash([]);
-      if (g.label) { ctx.fillStyle = 'rgba(47,191,113,0.95)'; ctx.font = THEME.font; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(g.label, x0 + 4, Y(g.midi + 0.5) - 1); }
+      if (g.label) { ctx.fillStyle = `rgba(${r},${gg},${b},0.95)`; ctx.font = THEME.font; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(g.label, x0 + 4, Y(g.midi + Math.max(hw, 0.3)) - 1); }
     }
     // trace
     const cls = classify(data.t, data.midi, opts.offset || 0);

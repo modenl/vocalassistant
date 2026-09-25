@@ -23,6 +23,12 @@ export async function renderSettings(root, app) {
         <label>${L('声部', 'Voice type')}</label>
         <select id="sVoice">${Object.entries(VOICE_TYPES).map(([k, v]) => `<option value="${k}" ${k === s.voiceType ? 'selected' : ''}>${v.name}${L('（', ' (')}${midiName(v.low)}–${midiName(v.high)}${L('）', ')')}</option>`).join('')}</select>
         <div class="help">${L('只用来把课程的练习音放在你舒服的音区。拿不准就选相近的，唱着不舒服再换。', 'Only used to put lesson notes in a comfortable range. If unsure, pick the closest one and change it if the notes feel uncomfortable.')}</div>
+        <label>${L('参考音', 'Reference notes')}</label>
+        <select id="sTimbre">
+          <option value="voice" ${s.refTimbre !== 'piano' ? 'selected' : ''}>${L('人声“啊”（推荐）', 'Sung “ah” (recommended)')}</option>
+          <option value="piano" ${s.refTimbre === 'piano' ? 'selected' : ''}>${L('钢琴', 'Piano')}</option>
+        </select>
+        <div class="help">${L('课程和音准训练里“先听再唱”的音。跟人声比跟乐器更容易唱准，而且会放在你声部的八度。', 'The notes you hear before singing in lessons and the pitch trainer. A voice is easier to match than an instrument, and it sits in your voice type’s octave.')}</div>
         <label>${L('标准音 A4', 'Reference A4')}</label>
         <input type="number" id="sA4" min="415" max="466" step="1" value="${s.a4}" />
         <div class="help">${L('判断音准的参考（一般是 440 Hz；跟钢琴或伴奏对齐时再改）。', 'The reference for pitch (usually 440 Hz; change it only to match a piano or backing track).')}</div>
@@ -43,7 +49,8 @@ export async function renderSettings(root, app) {
   const $ = (id) => root.querySelector('#' + id);
   $('sLang').onchange = (e) => app.updateSettings({ lang: e.target.value });
   $('sVoice').onchange = (e) => app.updateSettings({ voiceType: e.target.value });
-  $('sA4').onchange = (e) => app.updateSettings({ a4: Math.max(415, Math.min(466, +e.target.value || 440)) });
+  $('sTimbre').onchange = (e) => app.updateSettings({ refTimbre: e.target.value });
+  $('sA4').onchange =(e) => app.updateSettings({ a4: Math.max(415, Math.min(466, +e.target.value || 440)) });
   $('sDev').onchange = (e) => app.updateSettings({ deviceId: e.target.value });
   $('sGate').oninput = (e) => { app.updateSettings({ gateDb: +e.target.value }); e.target.previousElementSibling.textContent = `${L('噪声门限', 'Noise gate')} ${e.target.value} dBFS`; };
   $('sSave').onchange = (e) => app.updateSettings({ saveAudio: e.target.checked });

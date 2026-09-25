@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS = {
   saveAudio: true,
   deviceId: '',
   lang: 'auto', // 'auto' (system / browser language), 'zh' or 'en'
+  refTimbre: 'voice', // reference notes: 'voice' (sung "ah") or 'piano'
 };
 
 const SETTINGS_KEY = 'vocalassistant.settings.v1';

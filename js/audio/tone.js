@@ -1,8 +1,11 @@
-// Reference pitches (soft piano-like tone) for "listen first, then sing".
-// stopTones() silences everything still sounding and cancels pending notes,
-// so leaving a lesson never leaves a reference playing in the background.
+// Reference pitches for "listen first, then sing": a sung "ah" (default) or a
+// soft piano-like tone. People match a voice more accurately than an
+// instrument (Watts & Hall 2008), and a voice in their own octave avoids
+// octave confusion. stopTones() silences everything still sounding and
+// cancels pending notes, so leaving a page never leaves a reference playing.
 
 import { midiToHz } from '../config.js';
+import { synth, VOWELS } from './synth.js';
 
 let ctx = null;
 const sounding = new Set(); // output nodes of tones still playing
@@ -65,6 +68,42 @@ export async function playTone(midi, dur = 1.6, a4 = 440) {
 export async function playSequence(notes, noteDur = 0.7, a4 = 440) {
   for (const m of notes) if (!(await playTone(m, noteDur, a4))) return false;
   return true;
+}
+
+// Sung reference: the notes on "ah" (male or female vowel formants), rendered
+// by the source-filter synthesizer. Notes of ≥ 0.8 s get a slight, slow
+// vibrato (±8 cents) so they sound sung while their centre stays unambiguous.
+export async function playVoice(notes, { noteDur = 1.4, gap = 0.08, a4 = 440, sex = 'm' } = {}) {
+  const my = gen;
+  const c = await ready();
+  if (my !== gen) return false;
+  const vowel = sex === 'f' ? VOWELS.aF : VOWELS.a;
+  const vib = noteDur >= 0.8 ? 8 : 0;
+  const segs = notes.flatMap((m, i) => {
+    const f = midiToHz(m, a4);
+    const note = { dur: noteDur, vowel, oq: 0.55, sq: 2.4, jitter: 0.002, shimmer: 0.02, attack: 0.05, release: 0.08,
+      f0: (t) => f * Math.pow(2, (vib * Math.sin(2 * Math.PI * 5.2 * t) * Math.min(1, Math.max(0, t - 0.3) / 0.3)) / 1200) };
+    return i < notes.length - 1 ? [note, { dur: gap }] : [note];
+  });
+  const x = synth(segs, c.sampleRate); // peak 0.8
+  const buf = c.createBuffer(1, x.length, c.sampleRate);
+  buf.copyToChannel(Float32Array.from(x), 0);
+  const src = c.createBufferSource();
+  src.buffer = buf;
+  const out = c.createGain();
+  out.gain.value = 0.4;
+  src.connect(out).connect(c.destination);
+  const dur = x.length / c.sampleRate;
+  scheduled(dur);
+  src.start();
+  return hold(out, dur, my);
+}
+
+// The reference in the chosen timbre ('voice' | 'piano'). Resolves true if it
+// played to the end, false if stopped.
+export function playRef(notes, { timbre = 'voice', sex = 'm', a4 = 440, noteDur, gap } = {}) {
+  if (timbre === 'piano') return notes.length > 1 ? playSequence(notes, noteDur ?? 0.7, a4) : playTone(notes[0], noteDur ?? 1.6, a4);
+  return playVoice(notes, { noteDur: noteDur ?? (notes.length > 1 ? 0.6 : 1.4), gap, a4, sex });
 }
 
 // Demo siren: glide from `lo` up to `hi` and back down (sine-ish, soft).

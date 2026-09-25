@@ -30,6 +30,23 @@ const texts = [
 ];
 const bad = texts.filter((t) => han.test(t));
 ok('English: analysis, statuses and lessons have no Chinese', !bad.length, bad.slice(0, 3).join(' | '));
+
+// the pitch trainer's texts
+const G = await import('../js/gym/drills.js');
+const it = { match: { kind: 'match', notes: [53] }, degree: { kind: 'degree', tonic: 53, off: 4, notes: [57] }, echo: { kind: 'echo', notes: [53, 57, 55] } };
+const res = (o) => ({ ok: false, tol: 50, notes: [{ target: 57, dev: -70 }], intervals: [], ...o });
+const gymTexts = [
+  ...Object.values(G.KIND_NAME), ...Object.values(it).map(G.taskText),
+  ...[-5, -3, -1, 2, 4, 5, 7, 9, 11, 12].map(G.degreeName), ...[-250, -40, 0, 30, 120].map(G.devText),
+  G.resultText(it.match, res({ ok: true, notes: [{ dev: 12 }] })), G.resultText(it.match, res({})), G.resultText(it.match, { noAnswer: true }),
+  G.resultText(it.degree, res({ ok: true })), G.resultText(it.degree, res({ notes: [{ dev: -200 }] })), G.resultText(it.degree, res({ octaveErr: true, notes: [{ dev: -1200 }] })),
+  G.resultText(it.echo, res({ ok: true, notes: [{ dev: 0 }, { dev: 5 }, { dev: -3 }] })), G.resultText(it.echo, res({ notes: [{ dev: 0 }, { dev: 80 }, { dev: -60 }] })),
+  G.resultText(it.echo, res({ notes: [], countErr: { sung: 2, need: 3 } })), G.resultText(it.echo, res({ notes: [{ dev: 70 }, { dev: 72 }, { dev: 68 }] })),
+  ...['flat', 'sharp', 'compress', 'stretch', 'up', 'down', 'degree', 'octave'].flatMap((key) => Object.values(G.findingText({ key, v: 30, w: 10, off: 9, n: 2 }))),
+  ...['low', 'mid', 'high'].flatMap((bin) => Object.values(G.findingText({ key: 'register', bin, v: 40, w: 15 }))),
+];
+const badG = gymTexts.filter((t) => !t || han.test(t));
+ok('English: pitch trainer texts have no Chinese', !badG.length, badG.slice(0, 3).join(' | '));
 ok('English: dimension names', DIMS.map((d) => d.title).join(',') === 'Pitch,Rhythm,Breath,Technique,Expression');
 
 console.log(fails ? `\n${fails} FAILED` : '\nall i18n checks passed');

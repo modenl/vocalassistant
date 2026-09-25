@@ -4,7 +4,7 @@ import { LESSONS, lessonById, loadProgress, saveProgress, gradeOf } from '../les
 import { StepRunner } from '../lessons/runner.js';
 import { VOICE_TYPES, midiName } from '../config.js';
 import { PitchTrack } from '../viz/pitchTrack.js';
-import { playTone, playGlide, playSequence, stopTones } from '../audio/tone.js';
+import { playRef, playGlide, stopTones } from '../audio/tone.js';
 import { L as tr } from '../i18n.js';
 
 const SPAN = 10;
@@ -119,8 +119,7 @@ export class LessonsView {
       btn.disabled = true;
       try {
         if (L.id === 'glide') await playGlide(ref[0], ref[1], 4, a4);
-        else if (ref.length > 1) await playSequence(ref, 0.7, a4);
-        else await playTone(ref[0], 1.8, a4);
+        else await playRef(ref, { timbre: this.app.settings.refTimbre, sex: this.P.sex, a4, noteDur: ref.length > 1 ? 0.7 : 1.8 });
       } finally { btn.disabled = false; }
       return;
     }

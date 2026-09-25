@@ -26,7 +26,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 .muted { color: var(--muted); }
 .t2 { color: var(--text-2); }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.hidden { display: none !important; }
+.hidden, [hidden] { display: none !important; }
 
 
 /* ---------- header ---------- */
@@ -240,3 +240,43 @@ svg.radar .rs { fill: var(--text-2); font-size: 12px; font-family: var(--mono); 
 .part .pbar i { display: block; height: 100%; border-radius: 4px; }
 .part .ptext { color: var(--text-2); }
 @media (max-width: 520px) { .part { grid-template-columns: 56px 60px 1fr; } }
+
+/* ---------- pitch trainer ---------- */
+.gym-opts { display: flex; gap: 8px 16px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; font-size: 13px; color: var(--text-2); }
+.gym-opts select { margin-left: 4px; }
+.gym-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 12px; }
+@media (max-width: 900px) { .gym-grid { grid-template-columns: 1fr; } }
+.gym-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 18px; margin-bottom: 8px; }
+.gym-dots { display: flex; gap: 5px; }
+.gym-dots i { width: 12px; height: 12px; border-radius: 50%; background: var(--surface-3); border: 1px solid var(--border); }
+.gym-dots i.cur { border-color: var(--accent); background: rgba(57, 135, 229, 0.4); }
+.gym-dots i.ok { background: var(--good); border-color: var(--good); }
+.gym-dots i.bad { background: var(--critical); border-color: var(--critical); }
+.gym-dots i.skip { background: var(--muted); border-color: var(--muted); }
+.gym-kind { font-size: 12.5px; }
+.gym-say { font-size: 21px; font-weight: 700; margin: 10px 0; line-height: 1.35; }
+.gym-say b { color: #8bd46a; }
+.gym-phases { display: flex; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.gym-phases span { padding: 3px 10px; border-radius: 12px; border: 1px solid var(--border); color: var(--muted); }
+.gym-phases span.on { color: var(--text); border-color: var(--accent); background: rgba(57, 135, 229, 0.2); font-weight: 600; }
+.gym-phases span.done { color: var(--text-2); }
+.gym-notes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.gym-notes span { font-family: var(--mono); font-size: 12.5px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
+.gym-notes span.ok { color: #6fdc6f; border-color: rgba(12, 163, 12, 0.5); background: rgba(12, 163, 12, 0.1); }
+.gym-notes span.bad { color: #ff8a8a; border-color: rgba(208, 59, 59, 0.6); background: rgba(208, 59, 59, 0.1); }
+.gym-ev { margin-top: 6px; font-size: 12.5px; color: #8bd46a; }
+.gym-trace { position: relative; }
+.gym-blind { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 4px; padding: 16px; font-size: 14px; color: var(--text-2); background: var(--surface-2); border-radius: 6px; line-height: 1.7; }
+.gym-level { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
+.gym-sum, .gym-status, .gym-why { margin-top: 12px; }
+.gym-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 640px) { .gym-stats { grid-template-columns: 1fr; } }
+.gym-stats > div { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.gym-stats b { font-size: 24px; }
+.gym-stats span { font-size: 12px; color: var(--text-2); }
+.gym-find { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 8px; font-size: 13.5px; }
+.gym-prog { display: flex; gap: 10px; flex-wrap: wrap; }
+.gym-prog > div { display: flex; align-items: baseline; gap: 6px; background: var(--surface-2); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; }
+.gym-prog b { font-size: 16px; }
+.gym-why summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.gym-why ul { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 6px; font-size: 13px; color: var(--text-2); }

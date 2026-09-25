@@ -1,6 +1,7 @@
 // Source-filter singing synthesizer (browser + Node): Rosenberg glottal pulse
 // (open quotient / speed quotient per cycle), radiated as its derivative, through
-// a cascade of 2-pole formant resonators. Used for lesson demos and tests.
+// a cascade of 2-pole formant resonators. Used for the sung reference notes
+// (tone.js) and for tests.
 
 let seed = 12345;
 function rand() { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; }
@@ -8,6 +9,8 @@ function randn() { const u = rand() || 1e-9, v = rand(); return Math.sqrt(-2 * M
 
 export const VOWELS = {
   a: [{ f: 730, b: 80 }, { f: 1150, b: 90 }, { f: 2500, b: 120 }, { f: 3300, b: 150 }, { f: 3900, b: 200 }],
+  // "ah" of a female voice: formants ≈ 15 % higher (shorter vocal tract; Peterson & Barney 1952)
+  aF: [{ f: 850, b: 90 }, { f: 1250, b: 100 }, { f: 2850, b: 130 }, { f: 3700, b: 160 }, { f: 4400, b: 220 }],
   e: [{ f: 480, b: 70 }, { f: 1950, b: 100 }, { f: 2600, b: 120 }, { f: 3400, b: 150 }, { f: 4000, b: 200 }],
   // nasal murmur of "n" (closed mouth): low F1, weak damped upper resonances
   n: [{ f: 260, b: 90 }, { f: 1100, b: 350 }, { f: 2300, b: 400 }, { f: 3300, b: 400 }, { f: 4000, b: 400 }],
