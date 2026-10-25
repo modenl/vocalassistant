@@ -394,8 +394,13 @@ ol.refs a:hover { text-decoration: underline; }
 .al-now { display: flex; gap: 14px; align-items: center; min-width: 300px; min-height: 44px; justify-content: flex-end; }
 .al-nowbox { display: flex; gap: 6px; align-items: center; }
 .al-nowbox > b { font-size: 22px; font-family: var(--mono); min-width: 48px; }
-.al-sep { font-size: 12px; color: var(--text-2); margin: 4px 0 0; height: 1.5em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.al-sep { display: flex; align-items: center; gap: 10px; height: 30px; margin: 4px 0 0; font-size: 12.5px; color: var(--text-2); }
+.al-sep-t { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.al-sep .bar { flex: 0 0 180px; visibility: hidden; }
+.al-sep .al-skip { flex: 0 0 auto; padding: 3px 10px; font-size: 12px; visibility: hidden; }
+.al-sep.busy .bar, .al-sep.busy .al-skip { visibility: visible; }
 .al-sep.ok { color: #6fdc6f; } .al-sep.warn { color: #f0b429; }
+@media (max-width: 640px) { .al-sep .bar { flex-basis: 80px; } }
 .al-tip { font-size: 13px; color: var(--text-2); margin: 6px 0 10px; min-height: 2.9em; line-height: 1.45; }
 .al-tip.warn { color: var(--text-2); }
 .al-scroll { overflow-x: auto; overflow-y: hidden; }

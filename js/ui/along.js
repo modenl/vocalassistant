@@ -11,7 +11,7 @@ import { AudioEngine } from '../audio/engine.js';
 import { FrameAnalyzer } from '../dsp/analyzer.js';
 import { PitchTracker } from '../analysis/pitch.js';
 import { decodeSong, extractMelody, resampleTo44k } from '../along/melody.js';
-import { separateVocals } from '../along/separate.js';
+import { separateVocals, releaseSeparator } from '../along/separate.js';
 import { videoIdOf, createPlayer, bilibiliEmbedOf } from '../along/youtube.js';
 import { captureTabAudio, canCaptureTab } from '../along/tabcapture.js';
 import { VOICE_TYPES, midiName } from '../config.js';
@@ -60,7 +60,7 @@ export class AlongView {
         <span class="status al-status" id="alStatus">${L('支持 mp3、m4a、wav 等歌曲文件。', 'mp3, m4a, wav and other song files.')}</span>
         <div class="al-now" id="alNow"></div>
       </div>
-      <p class="al-sep" id="alSep"></p>
+      <div class="al-sep" id="alSep"><span class="al-sep-t"></span><div class="bar"><div class="fill"></div></div><button class="btn al-skip">${L('跳过（按混音分析，较不准）', 'Skip (analyse the mix, less accurate)')}</button></div>
       <p class="al-tip" id="alTip">🎧 ${L('请戴耳机：原唱只从耳机里放，麦克风就只录到你。用音箱外放时，麦克风会同时录到原唱，结果不准。', 'Wear headphones: the original plays only in them, so the microphone hears only you. Played through speakers, the microphone records the original too and the result isn’t reliable.')}</p>
       <div class="panel">
         <div class="al-scroll" id="alScroll"><canvas class="viz" id="alView" style="height:320px"></canvas></div>
@@ -157,15 +157,17 @@ export class AlongView {
       let peak = 0;
       for (let i = 0; i < x.length; i += 31) peak = Math.max(peak, Math.abs(x[i]));
       if (peak < 1e-4) throw new Error(L('文件里没有声音', 'the file is silent'));
-      $('alStatus').textContent = L('正在提取原唱的旋律…', 'Extracting the original’s melody…');
-      const t = performance.now(), mel = await extractMelody(x, this.app.settings.a4).catch(() => { throw new Error(L('提取不出旋律', 'no melody could be extracted')); });
+      const t = performance.now(), song = { name: file.name, buf, x, sr: 44100, mel: { frames: [], notes: [], secs: 0 } };
+      this.song = song;
+      $('alStatus').textContent = L(`正在分析“${file.name}”…`, `Analysing “${file.name}”…`);
+      const mel = await this.analyseSong(song, x, 0);
+      if (this.song !== song) return;
       if (mel.notes.length < 3) throw new Error(L('找不到明显的旋律（纯伴奏、打击乐或说话？）', 'no clear melody (backing only, percussion or speech?)'));
-      this.song = { name: file.name, buf, mel, x, sr: 44100 };
       this.user = []; this.result = null;
-      $('alStatus').textContent = L(`“${file.name}”：${fmtT(mel.secs)}，找到 ${mel.notes.length} 个旋律音（${((performance.now() - t) / 1000).toFixed(1)} 秒）。戴上耳机，点“开始跟唱”。`, `“${file.name}”: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes found (${((performance.now() - t) / 1000).toFixed(1)} s). Put on headphones and press “Sing along”.`);
+      $('alStatus').textContent = L(`“${file.name}”：${fmtT(mel.secs)}，找到 ${mel.notes.length} 个旋律音（分析用了 ${((performance.now() - t) / 1000).toFixed(0)} 秒）。戴上耳机，点“开始跟唱”。`, `“${file.name}”: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes found (analysed in ${((performance.now() - t) / 1000).toFixed(0)} s). Put on headphones and press “Sing along”.`);
       $('alGo').disabled = false;
-      this.separateSong(this.song, x, 0);
     } catch (err) {
+      this.song = null;
       $('alStatus').textContent = L(`读不了这个文件：${err.message}`, `Can’t read this file: ${err.message}`);
     }
     this.draw(0);
@@ -336,40 +338,51 @@ export class AlongView {
     T.chunks.forEach((c, i) => x.set(c, i * per));
     T.chunks = [];
     this.song.tabAudio = { x, sr: T.sr, offset: T.offset }; // in memory only, for the spectra; never stored
-    try {
-      const x44 = await resampleTo44k(x, T.sr), m = await extractMelody(x44, this.app.settings.a4);
-      const frames = m.frames.map((f) => ({ t: f.t + T.offset, midi: f.midi }));
-      this.song.mel = { frames, notes: notesOf(frames), secs: x.length / T.sr };
-      this.separateSong(this.song, x44, T.offset);
-    } catch { /* keep the rolling result */ }
+    $('alGo').disabled = true;
+    try { await this.analyseSong(this.song, await resampleTo44k(x, T.sr), T.offset); } catch { /* keep the rolling result */ }
+    $('alGo').disabled = false;
   }
 
-  // Demucs in the background (along/separate.js): the lead vocal out of the
-  // song, then the original's melody again from the vocal alone — with the
+  // The original's melody, worked out once before singing (YouTube / Bilibili:
+  // once after it, the song only being heard while it plays): Demucs
+  // (along/separate.js) separates the lead vocal, MELODIA follows it — with the
   // band in the mix MELODIA follows chords and bass much of the time (a
   // synthetic song: 22 of 176 moments right on the mix, 160 on the vocal).
-  // The spectra then show the vocal too. Until it's done, all of it works on
-  // the mix. offset: song time of x[0]. Nothing is stored or sent anywhere.
-  async separateSong(song, x, offset = 0) {
-    const el = this.root.querySelector('#alSep'), show = (t, cls = '') => { if (this.song === song && el) { el.textContent = t; el.className = `al-sep ${cls}`; } };
-    show(L('准备分离人声（Demucs）…', 'Getting ready to separate the vocal (Demucs)…'));
+  // Then the model is released (≈ 1 GB of GPU / main memory): nothing runs
+  // beside the singing. Skipped or failed: the mix, as before. The progress
+  // line has a fixed height. offset: song time of x[0]. Nothing leaves the device.
+  // → the melody (also set on the song, with song.vox = the vocal)
+  async analyseSong(song, x, offset = 0) {
+    const box = this.root.querySelector('#alSep'), txt = box.querySelector('.al-sep-t'), fill = box.querySelector('.fill'), skip = box.querySelector('.al-skip');
+    const show = (t, p = null, cls = 'busy') => { if (this.song !== song) return; txt.textContent = t; box.className = `al-sep ${cls}`; if (p != null) fill.style.width = `${Math.round(p * 100)}%`; };
+    const pct = (p) => `${Math.round(p * 100)}%`;
+    let vox = null, why = '';
+    skip.onclick = () => releaseSeparator();
+    show(L('第 1 步：准备人声分离模型（Demucs）…', 'Step 1: getting the vocal-separation model (Demucs) ready…'), 0);
     try {
       const r = await separateVocals(x, {
-        onProgress: ({ stage, progress, device }) => show(stage === 'download' ? L(`下载人声分离模型（Demucs，约 180 MB，只下载一次）… ${Math.round(progress * 100)}%`, `Downloading the vocal-separation model (Demucs, about 180 MB, once only)… ${Math.round(progress * 100)}%`)
-          : stage === 'load' ? L('载入人声分离模型…', 'Loading the vocal-separation model…')
-          : L(`正在把原唱的人声和伴奏分开（Demucs，${device === 'webgpu' ? 'GPU' : 'CPU，较慢'}）… ${Math.round(progress * 100)}%　分好之前按混音分析`, `Separating the original’s vocal from the band (Demucs, ${device === 'webgpu' ? 'GPU' : 'CPU, slower'})… ${Math.round(progress * 100)}% — until then the mix is analysed`)),
+        onProgress: ({ stage, progress, device }) => show(
+          stage === 'download' ? L(`第 1 步：下载人声分离模型（约 180 MB，只下载这一次）… ${pct(progress)}`, `Step 1: downloading the vocal-separation model (about 180 MB, this once only)… ${pct(progress)}`)
+            : stage === 'load' ? L('第 1 步：载入人声分离模型…', 'Step 1: loading the vocal-separation model…')
+            : L(`第 2 步：把原唱的人声和伴奏分开（${device === 'webgpu' ? 'GPU' : 'CPU，较慢'}）… ${pct(progress)}`, `Step 2: separating the original’s vocal from the band (${device === 'webgpu' ? 'GPU' : 'CPU, slower'})… ${pct(progress)}`),
+          stage === 'load' ? 1 : progress),
       });
-      if (this.song !== song) return;
-      const m = await extractMelody(r.vocals, this.app.settings.a4);
-      if (this.song !== song) return;
-      song.vox = { x: r.vocals, sr: 44100, offset };
-      if (m.notes.length >= 3) { const frames = m.frames.map((f) => ({ t: f.t + offset, midi: f.midi })); song.mel = { frames, notes: notesOf(frames), secs: Math.max(song.mel.secs, offset + m.secs) }; }
-      show(L(`✓ 已把人声分出来（Demucs，${r.device === 'webgpu' ? 'GPU' : 'CPU'}，${r.secs.toFixed(0)} 秒）：原唱的旋律和频谱都只看人声，伴奏不再干扰`, `✓ Vocal separated (Demucs, ${r.device === 'webgpu' ? 'GPU' : 'CPU'}, ${r.secs.toFixed(0)} s): the original’s melody and spectra now use the vocal alone, free of the band`), 'ok');
-      if (this.result && !this.eng) this.finish(); else if (!this.eng) this.draw(this.reviewT ?? 0);
-      if (this.reviewT != null) this.drawSpectra(this.reviewT);
+      vox = r.vocals;
+      why = L(`人声已分离（${r.device === 'webgpu' ? 'GPU' : 'CPU'}，${r.secs.toFixed(0)} 秒）`, `vocal separated (${r.device === 'webgpu' ? 'GPU' : 'CPU'}, ${r.secs.toFixed(0)} s)`);
     } catch (err) {
-      show(L(`人声分离没成功（${err.message}），原唱按混音分析`, `Vocal separation failed (${err.message}); the original is analysed from the mix`), 'warn');
+      why = err.message === 'cancelled' ? L('跳过了人声分离', 'vocal separation skipped') : L(`人声分离没成功（${err.message}）`, `vocal separation failed (${err.message})`);
+    } finally {
+      releaseSeparator(); // the model leaves memory before the singing
     }
+    if (this.song !== song) return song.mel || { frames: [], notes: [], secs: 0 };
+    show(L(`第 3 步：从${vox ? '人声' : '混音'}里提取原唱的旋律…`, `Step 3: extracting the original’s melody from the ${vox ? 'vocal' : 'mix'}…`), 1);
+    const m = await extractMelody(vox || x, this.app.settings.a4).catch(() => { throw new Error(L('提取不出旋律', 'no melody could be extracted')); });
+    const frames = m.frames.map((f) => ({ t: f.t + offset, midi: f.midi }));
+    song.mel = { frames, notes: notesOf(frames), secs: Math.max(song.mel?.secs || 0, offset + m.secs) };
+    if (vox) song.vox = { x: vox, sr: 44100, offset };
+    show(vox ? L(`✓ ${why}，模型已卸载：原唱的旋律和频谱只看人声，伴奏不干扰`, `✓ ${why}, model unloaded: the original’s melody and spectra use the vocal alone, free of the band`)
+      : L(`${why}：原唱按混音分析（伴奏可能被当成旋律）`, `${why}: the original is analysed from the mix (the band may be taken for the melody)`), null, vox ? 'ok' : 'warn');
+    return song.mel;
   }
 
   // the delay lined up, every note compared, the whole song drawn
