@@ -4,7 +4,7 @@
 import { FrameAnalyzer } from '../js/dsp/analyzer.js';
 import { PitchTracker } from '../js/analysis/pitch.js';
 import { DEFAULT_SETTINGS } from '../js/config.js';
-import { notesOf, bestLag, compareAlong } from '../js/along/compare.js';
+import { notesOf, bestLag, compareAlong, noteScore, scoreAlong } from '../js/along/compare.js';
 import { spectrumAt, harmonicsOf, formantsAt, pitchRelation, ringOf, envelopeFormants } from '../js/along/spectra.js';
 import { synth, hz, VOWELS } from '../tools/synth.mjs';
 
@@ -106,6 +106,14 @@ const run = (opts) => { const u = sing(opts), L = bestLag(refFrames, u); return 
   const xr = Float32Array.from(synth([{ dur: 1, f0: () => 110, vowel: VOWELS.aRing, oq: 0.55, sq: 2.4 }], sr));
   const plainRing = ringOf(hm4), ringing = ringOf(harmonicsOf(spectrumAt(xr, sr, 22050), 110, 4000));
   ok('ring from the harmonics: the ringing voice is brighter', ringing < plainRing - 6, `ringing ${ringing.toFixed(0)} dB vs plain ${plainRing.toFixed(0)} dB`);
+}
+
+{
+  // the score: 100 within ±25 cents, 0 at a semitone, a note left out 0
+  ok('note score: ±25 cents → 100, 62.5 cents → 50, a semitone → 0', noteScore(20) === 100 && noteScore(-62.5) === 50 && noteScore(100) === 0 && noteScore(-140) === 0);
+  const all = scoreAlong(run({ delay: 0.25 }).R), part = scoreAlong(run({ delay: 0.25, cents: { 3: 60 }, skip: [6] }).R);
+  ok('a take all in tune scores 100', all.score === 100 && all.pitch === 100 && all.complete === 100, JSON.stringify(all));
+  ok('one note 60 cents sharp, one left out (of 8): about 81', part.complete === Math.round(700 / 8) && part.score >= 78 && part.score <= 84, JSON.stringify(part));
 }
 
 console.log(fails ? `\n${fails} FAILED` : '\nall sing-along checks passed');

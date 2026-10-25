@@ -141,3 +141,17 @@ export function compareAlong(refNotes, user, { minSung = 0.4, phrases = phrasesO
     },
   };
 }
+
+// A score for a take, 0–100: each of the original's notes in the lines sung
+// scores 100 within ±25 cents (in the key and octave it was judged in), falling
+// linearly to 0 at ±100 (a semitone); a note left out scores 0; the score is
+// their mean. Also: pitch (the mean over the notes sung) and completeness (the
+// share sung). Notes taken as accompaniment don't count.
+export const noteScore = (cents) => Math.max(0, Math.min(100, 100 * (1 - (Math.abs(cents) - 25) / 75)));
+export function scoreAlong(R) {
+  const notes = R.notes.filter((n) => n.status !== 'accomp');
+  if (!notes.length) return null;
+  const sung = notes.filter((n) => n.sung && Number.isFinite(n.user?.cents)), per = sung.map((n) => noteScore(n.user.cents));
+  const sum = per.reduce((a, b) => a + b, 0);
+  return { score: Math.round(sum / notes.length), pitch: sung.length ? Math.round(sum / sung.length) : 0, complete: Math.round((100 * sung.length) / notes.length) };
+}

@@ -20,7 +20,7 @@ import { videoIdOf, createPlayer, bilibiliEmbedOf } from '../along/youtube.js';
 import { features, locate, RATE as AL_RATE } from '../along/align.js';
 import { captureTabAudio, canCaptureTab } from '../along/tabcapture.js';
 import { VOICE_TYPES, midiName } from '../config.js';
-import { notesOf, bestLag, compareAlong, phrasesOf, coverOf } from '../along/compare.js';
+import { notesOf, bestLag, compareAlong, phrasesOf, coverOf, scoreAlong, noteScore } from '../along/compare.js';
 import { drawAlong, drawSpectraPair, ALONG_COLORS } from '../viz/along.js';
 import { pitchRelation, voiceSide } from '../along/spectra.js';
 import { VoiceCards } from './voiceCards.js';
@@ -881,22 +881,30 @@ export class AlongView {
     const keyTxt = s.key ? L(`你比原唱${s.key < 0 ? '低' : '高'} ${semi(s.key)}唱（换了调），按你唱的调比较：每个音和原唱移调后的音比，只看音与音之间准不准（相对音高）。`, `You sang ${semi(s.key)} ${s.key < 0 ? 'lower' : 'higher'} than the original (another key); compared in your key: each note against the original’s, moved to your key — how well the notes relate (relative pitch).`)
       : this.keyMode === 'absolute' ? L('按原调比较（绝对音高）：每个音和原唱的音直接比。', 'Compared in the original key (absolute pitch): each note straight against the original’s.') : '';
     const seg = `<div class="seg al-key">${[['auto', L('自动', 'Auto')], ['relative', L('按你唱的调（相对音高）', 'In your key (relative)')], ['absolute', L('按原调（绝对音高）', 'In the original key (absolute)')]].map(([k, t]) => `<button data-key="${k}" class="${this.keyMode === k ? 'on' : ''}">${t}</button>`).join('')}</div>`;
-    const pct = s.sung ? Math.round((s.inTune / s.sung) * 100) : 0;
+    const pct = s.sung ? Math.round((s.inTune / s.sung) * 100) : 0, sc = scoreAlong(R);
+    const grade = !sc ? '' : sc.score >= 90 ? L('很棒', 'Excellent') : sc.score >= 75 ? L('不错', 'Good') : sc.score >= 60 ? L('及格', 'Fair') : L('继续练', 'Keep practising');
+    const scoreColor = !sc ? '' : sc.score >= 90 ? '#2fbf71' : sc.score >= 75 ? '#8bd46a' : sc.score >= 60 ? '#f0b429' : '#ef5a5a';
+    const scoreHtml = sc ? `<div class="al-score">
+        <div class="al-score-n" style="color:${scoreColor}">${sc.score}<small>${L('分', '')}</small></div>
+        <div class="al-score-t"><b>${grade}</b>
+          <span>${L(`音准 ${sc.pitch} · 完整度 ${sc.complete}%`, `pitch ${sc.pitch} · completeness ${sc.complete}%`)}</span>
+          <small class="muted">${L('每个音：±25 音分以内 100 分，偏到一个半音扣到 0；漏唱的音 0 分；总分是平均。没唱的段落当伴奏，不计。', 'Each note: 100 within ±25 cents, down to 0 at a semitone off; a note left out scores 0; the score is the mean. Lines not sung count as accompaniment, not scored.')}</small></div></div>` : '';
     const tend = Math.abs(s.bias) < 10 ? L('整体不偏高也不偏低', 'no overall tendency') : s.bias > 0 ? L(`整体偏高约 ${s.bias} 音分`, `overall about ${s.bias} cents sharp`) : L(`整体偏低约 ${-s.bias} 音分`, `overall about ${-s.bias} cents flat`);
     const oct = s.octave ? L(`你比原唱${octTxt(s.octave)}唱（很正常，比如${s.octave < 0 ? '男生跟女歌手' : '女生跟男歌手'}），按同一个音名比较。`, `You sang ${octTxt(s.octave)} than the original (normal, e.g. ${s.octave < 0 ? 'a man along a woman' : 'a woman along a man'}); compared by note name.`) : '';
     const rows = R.notes.filter((n) => n.status !== 'accomp').map((n, i) => `<tr class="al-${n.status}"><td>${i + 1}</td><td>${fmtT(n.t0)}</td><td style="color:${ALONG_COLORS.ref}"><b>${n.name}</b>${s.key ? ` <small>→ ${midiName(Math.round(n.midi + s.key))}</small>` : ''}</td>
       <td style="color:${ALONG_COLORS.mine}">${n.sung ? `<b>${n.user.name}</b>${n.user.octave ? ` <small>${octTxt(n.user.octave)}</small>` : ''}` : '—'}</td>
-      <td>${n.sung ? centsTxt(n.user.cents) : ''}</td><td><i class="al-dot" style="background:${ALONG_COLORS[n.status === 'missed' ? 'none' : n.status]}"></i>${T[n.status]}</td></tr>`).join('');
+      <td>${n.sung ? centsTxt(n.user.cents) : ''}</td><td><i class="al-dot" style="background:${ALONG_COLORS[n.status === 'missed' ? 'none' : n.status]}"></i>${T[n.status]}</td><td class="mono">${n.sung && Number.isFinite(n.user?.cents) ? Math.round(noteScore(n.user.cents)) : 0}</td></tr>`).join('');
     this.root.querySelector('#alRes').innerHTML = `
       <div class="panel" style="margin-top:12px">
         <div class="ph"><h3>${L('这一遍的音准', 'Pitch this time')}</h3><span class="sub">${L(`录放延迟 ${Math.round(lag.lag * 1000)} 毫秒，已自动对齐`, `recording delay ${Math.round(lag.lag * 1000)} ms, lined up`)}</span></div>
+        ${scoreHtml}
         ${seg}
         ${keyTxt ? `<p style="font-size:13.5px;margin:4px 0">${keyTxt}</p>` : ''}
         <p style="font-size:15px">${L(`你唱的那几句里，原唱有 <b>${s.total}</b> 个音，你唱了 <b>${s.sung}</b> 个，其中 <b>${s.inTune}</b> 个在 ±50 音分以内（${pct}%）；${tend}。`, `In the lines you sang, the original has <b>${s.total}</b> notes; you sang <b>${s.sung}</b>, <b>${s.inTune}</b> of them within ±50 cents (${pct}%); ${tend}.`)} ${oct}</p>
         ${s.accomp ? `<p class="muted" style="font-size:12.5px">${L(`另有 ${s.accomp} 个音在你没唱的地方（句与句之间、前奏间奏），当作伴奏，不计分；整句没唱的也算在这里。`, `${s.accomp} more notes fall where you didn’t sing (between lines, intros, solos): taken as accompaniment, not scored — a whole line left out counts here too.`)}</p>` : ''}
         ${s.worst.length ? `<p><b>${L('最不准的音：', 'Furthest off: ')}</b>${s.worst.map((n) => L(`${fmtT(n.t0)} 原唱 <b style="color:${ALONG_COLORS.ref}">${n.name}</b>，你 <b style="color:${ALONG_COLORS.mine}">${n.user.name}</b>（${centsTxt(n.user.cents)}）`, `${fmtT(n.t0)} original <b style="color:${ALONG_COLORS.ref}">${n.name}</b>, you <b style="color:${ALONG_COLORS.mine}">${n.user.name}</b> (${centsTxt(n.user.cents)})`)).join('；')}</p>` : ''}
         <p class="muted" style="font-size:12px">${L('上面的图已经换成整首歌：蓝条是原唱，彩色线是你（颜色 = 准不准），橙字是你唱的音名。下表是每个音的对照。', 'The chart above now shows the whole song: blue bars = the original, the coloured line = you (colour = how close), orange = the note you sang. The table compares every note.')}</p>
-        <div class="al-table"><table><thead><tr><th>#</th><th>${L('时间', 'Time')}</th><th>${L('原唱', 'Original')}</th><th>${L('你', 'You')}</th><th>${L('差', 'Difference')}</th><th>${L('结果', 'Result')}</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <div class="al-table"><table><thead><tr><th>#</th><th>${L('时间', 'Time')}</th><th>${L('原唱', 'Original')}</th><th>${L('你', 'You')}</th><th>${L('差', 'Difference')}</th><th>${L('结果', 'Result')}</th><th>${L('得分', 'Score')}</th></tr></thead><tbody>${rows}</tbody></table></div>
       </div>`;
     this.root.querySelectorAll('#alRes [data-key]').forEach((b) => { b.onclick = () => this.setKeyMode(b.dataset.key); });
   }
