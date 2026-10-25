@@ -72,3 +72,73 @@ export function drawAlong(canvas, { range, win, ref = [], user = [], mine = [], 
   if (now != null && now >= t0 && now <= t1) { ctx.strokeStyle = 'rgba(232,235,241,0.6)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(X(now) + 0.5, y0); ctx.lineTo(X(now) + 0.5, y1); ctx.stroke(); }
   if (!ref.length) { ctx.fillStyle = THEME.muted; ctx.font = THEME.font; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(L('导入原唱后，这里显示原唱的每个音', 'Import the original: its notes show here'), (x0 + x1) / 2, (y0 + y1) / 2); }
 }
+
+// The original (top lane) and the singer (bottom lane) at one moment, on one
+// linear frequency axis: each spectrum, its F0 (the pitch) with the note name,
+// the harmonics numbered, the singer's F1 / F2 (the vowel), and dashed links
+// where a harmonic of one sits on a harmonic of the other (an octave apart:
+// every 2nd harmonic of the lower voice). `say`: one line on top.
+// side: { spec: { db, binHz }, f0, name, harm: [{ k, f, db }], formants: [F1, F2] }
+export function drawSpectraPair(canvas, { ref = null, user = null, say = '', fmax = 2500 } = {}) {
+  const { ctx, w, h } = fit(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const x0 = 44, x1 = w - 10, top = 42, laneH = (h - top - 26) / 2;
+  const X = (f) => x0 + (Math.min(fmax, f) / fmax) * (x1 - x0);
+  const lanes = [{ side: ref, y0: top, color: ALONG_COLORS.ref, label: L('原唱', 'Original') }, { side: user, y0: top + laneH, color: ALONG_COLORS.mine, label: L('你', 'You') }];
+  // the words on top: up to two lines, wrapped by character (Chinese has no spaces)
+  ctx.font = 'bold 12.5px -apple-system, "PingFang SC", sans-serif'; ctx.fillStyle = THEME.text; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  const text = say || L('唱起来、或在上面的音高图上点一下，就显示那一刻的频谱', 'Sing, or click the pitch chart above, to see the spectra at that moment');
+  const lines = [''];
+  for (const ch of text) {
+    const cur = lines[lines.length - 1];
+    if (ctx.measureText(cur + ch).width > x1 - x0) { if (lines.length === 2) { lines[1] = cur.slice(0, -1) + '…'; break; } lines.push(ch.trim() ? ch : ''); } else lines[lines.length - 1] = cur + ch;
+  }
+  lines.forEach((ln, i) => ctx.fillText(ln, x0, 3 + i * 16));
+  // frequency grid
+  ctx.font = THEME.font; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let f = 0; f <= fmax; f += 250) {
+    ctx.strokeStyle = f % 1000 === 0 ? THEME.gridStrong : THEME.grid; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(X(f) + 0.5, top); ctx.lineTo(X(f) + 0.5, top + 2 * laneH); ctx.stroke();
+    if (f % 500 === 0) { ctx.fillStyle = THEME.muted; ctx.fillText(f ? `${f} Hz` : '0', X(f), top + 2 * laneH + 4); }
+  }
+  for (const { side, y0, color, label } of lanes) {
+    const yb = y0 + laneH - 4, Ydb = (db) => yb - (Math.max(-70, Math.min(0, db)) + 70) / 70 * (laneH - 26);
+    ctx.fillStyle = THEME.text2; ctx.font = 'bold 11px -apple-system, "PingFang SC", sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, x0 - 6, y0 + laneH / 2);
+    if (!side?.spec) continue;
+    // the spectrum
+    const { db, binHz } = side.spec;
+    ctx.strokeStyle = color; ctx.globalAlpha = 0.85; ctx.lineWidth = 1.2; ctx.beginPath();
+    for (let k = 1; k * binHz <= fmax; k++) { const x = X(k * binHz), y = Ydb(db[k]); k === 1 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+    ctx.stroke(); ctx.globalAlpha = 1;
+    // F1 / F2 (the singer): where the mouth and throat resonate — not the pitch
+    for (const [i, F] of (side.formants || []).entries()) {
+      ctx.strokeStyle = '#c792ea'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(X(F) + 0.5, y0 + 14); ctx.lineTo(X(F) + 0.5, yb); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = '#c792ea'; ctx.font = 'bold 11px ui-monospace, Menlo, monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(`F${i + 1}`, X(F), y0 + 2);
+    }
+    // harmonics, numbered; F0 = harmonic 1, with its frequency and note
+    for (const hm of side.harm || []) {
+      const x = X(hm.f), y = Ydb(hm.db);
+      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, hm.k === 1 ? 4.5 : 2.8, 0, 2 * Math.PI); ctx.fill();
+      if (hm.k <= 8) { ctx.fillStyle = THEME.text2; ctx.font = '10px ui-monospace, Menlo, monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText(hm.k, x, y - 5); }
+    }
+    if (side.f0 > 0) {
+      const x = X(side.f0);
+      ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x + 0.5, y0 + 14); ctx.lineTo(x + 0.5, yb); ctx.stroke();
+      ctx.fillStyle = color; ctx.font = 'bold 11.5px -apple-system, "PingFang SC", sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText(`F0 ${Math.round(side.f0)} Hz · ${side.name}`, Math.min(x + 4, x1 - 120), y0 + 14);
+    }
+  }
+  // links where harmonics of the two coincide (within 3 %)
+  if (ref?.harm?.length && user?.harm?.length) {
+    ctx.strokeStyle = 'rgba(232,235,241,0.35)'; ctx.setLineDash([2, 4]); ctx.lineWidth = 1;
+    for (const a of ref.harm) {
+      const b = user.harm.find((u) => Math.abs(u.f / a.f - 1) <= 0.03);
+      if (!b) continue;
+      ctx.beginPath(); ctx.moveTo(X(a.f) + 0.5, top + laneH - 4); ctx.lineTo(X(b.f) + 0.5, top + laneH + 14); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+}

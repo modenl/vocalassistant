@@ -22,7 +22,14 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
 
+class Server(http.server.ThreadingHTTPServer):
+    # the page loads dozens of ES modules at once: the default backlog of 5
+    # reset connections (ERR_CONNECTION_RESET) and left the page half-loaded
+    request_queue_size = 128
+    daemon_threads = True
+
+
 if __name__ == '__main__':
-    with http.server.ThreadingHTTPServer(('127.0.0.1', PORT), NoCacheHandler) as httpd:
+    with Server(('127.0.0.1', PORT), NoCacheHandler) as httpd:
         print(f'VocalLab → http://localhost:{PORT}')
         httpd.serve_forever()

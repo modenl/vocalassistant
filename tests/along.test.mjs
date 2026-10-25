@@ -5,6 +5,7 @@ import { FrameAnalyzer } from '../js/dsp/analyzer.js';
 import { PitchTracker } from '../js/analysis/pitch.js';
 import { DEFAULT_SETTINGS } from '../js/config.js';
 import { notesOf, bestLag, compareAlong } from '../js/along/compare.js';
+import { spectrumAt, harmonicsOf, formantsAt, pitchRelation } from '../js/along/spectra.js';
 import { synth, hz, VOWELS } from '../tools/synth.mjs';
 
 const sr = 44100;
@@ -77,6 +78,20 @@ const run = (opts) => { const u = sing(opts), L = bestLag(refFrames, u); return 
   const R = compareAlong([...ref, piano], u.map((f) => ({ ...f, t: f.t - Lg.lag })));
   ok('a note between lines (nobody singing): accompaniment, not counted', R.notes[R.notes.length - 1].status === 'accomp' && R.summary.total === MEL.length && R.summary.accomp === 1, `${R.notes[R.notes.length - 1].status} · total ${R.summary.total}`);
   ok('a note skipped inside a sung phrase: still "missed"', R.notes[6].status === 'missed', R.notes[6].status);
+}
+
+{
+  // the spectra view: F0 and its harmonics where they are, the singer's F1/F2,
+  // and how two pitches relate (an octave apart shows as every 2nd harmonic)
+  const r1 = pitchRelation(220, 110), r2 = pitchRelation(220, 214), r3 = pitchRelation(220, 221);
+  ok('relation: an octave below', r1.octave === -1 && r1.cents === 0 && r1.refName === 'A3' && r1.userName === 'A2');
+  ok('relation: 214 vs 220 Hz → 48 cents flat, near', r2.octave === 0 && r2.cents === -48 && r2.kind === 'near', `${r2.cents}`);
+  ok('relation: 221 vs 220 Hz → the same note', r3.kind === 'same');
+  const x = Float32Array.from(synth([{ dur: 1, f0: () => 110, vowel: VOWELS.a, oq: 0.55, sq: 2.4 }], sr));
+  const sp = spectrumAt(x, sr, 22050), hm = harmonicsOf(sp, 110, 2500);
+  ok('harmonics: found at k × F0', hm.length >= 20 && hm.every((h) => Math.abs(h.f / (h.k * 110) - 1) < 0.01), hm.slice(0, 4).map((h) => Math.round(h.f)).join(' '));
+  const fm = formantsAt(x, sr, 22050, 110);
+  ok('the singer’s F1, F2 (“ah”: 730, 1150 Hz)', fm && Math.abs(fm[0] / 730 - 1) < 0.1 && Math.abs(fm[1] / 1150 - 1) < 0.1, fm?.map(Math.round).join(' / '));
 }
 
 console.log(fails ? `\n${fails} FAILED` : '\nall sing-along checks passed');

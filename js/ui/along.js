@@ -15,7 +15,8 @@ import { videoIdOf, createPlayer, bilibiliEmbedOf } from '../along/youtube.js';
 import { captureTabAudio, canCaptureTab } from '../along/tabcapture.js';
 import { VOICE_TYPES, midiName } from '../config.js';
 import { notesOf, bestLag, compareAlong, phrasesOf, coverOf } from '../along/compare.js';
-import { drawAlong, ALONG_COLORS } from '../viz/along.js';
+import { drawAlong, drawSpectraPair, ALONG_COLORS } from '../viz/along.js';
+import { spectrumAt, harmonicsOf, formantsAt, pitchRelation } from '../along/spectra.js';
 import { pitchNowHtml } from './pitchNow.js';
 import { L } from '../i18n.js';
 
@@ -68,12 +69,23 @@ export class AlongView {
           <span><i style="background:rgba(154,163,181,0.45)"></i>${L('灰色 = 你没唱的地方，当作伴奏，不计分', 'grey = where you didn’t sing: taken as accompaniment, not scored')}</span>
         </div>
         <p class="muted al-cap" id="alCap">${L('原唱的旋律用 MELODIA 算法从歌曲里提取（Essentia.js）：前奏、间奏里的乐器旋律也可能被画出来，那几段不用跟。', 'The original’s melody is extracted from the song with the MELODIA algorithm (Essentia.js): instrumental intros and solos may show up too — no need to sing those.')}</p>
+        <h4 class="ls-h">${L('频谱对照：同一时刻的原唱和你', 'Spectra: the original and you at the same moment')}</h4>
+        <canvas class="viz" id="alSpec" style="height:270px"></canvas>
+        <p class="muted al-cap">${L('怎么看：竖粗线 F0 是基频，就是你听到的音高；后面一串点是谐波（F0 的 2 倍、3 倍……，编了号）。两条线的 F0 对齐 = 同一个音。低一个八度时，你的点密一倍，你的第 2 根谐波正好落在原唱的 F0 上（虚线连着重合的谐波）——音名一样、只差八度。紫色虚线 F1、F2 是你的共振峰：口腔喉咙放大声音的位置，决定元音，和音高无关（原唱混着伴奏，测不准，不标）。唱完以后，点上面音高图的任何位置，就显示那一刻。', 'How to read it: the thick line F0 is the fundamental — the pitch you hear; the dots after it are the harmonics (2×, 3× F0 …, numbered). F0s lined up = the same note. An octave lower, your dots are twice as dense and your 2nd harmonic sits on the original’s F0 (dashed links join coinciding harmonics) — the same note name, an octave apart. The purple dashed F1, F2 are your formants: where your mouth and throat boost the sound, setting the vowel, not the pitch (not shown for the original: the band gets in the way). After singing, click anywhere on the pitch chart above to see that moment.')}</p>
       </div>
       <div id="alRes"></div>`;
     const $ = (id) => this.root.querySelector('#' + id);
     $('alPick').onclick = () => $('alFile').click();
     $('alFile').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) this.load(f); };
     $('alGo').onclick = () => (this.eng ? this.stop() : this.start());
+    // after singing: a click on the pitch chart shows the spectra at that moment
+    $('alView').onclick = (e) => {
+      if (this.eng || !this.result || !this.lastWin) return;
+      const r = $('alView').getBoundingClientRect(), [a, b] = this.lastWin, x0 = 44, x1 = r.width - 8;
+      this.reviewT = a + ((e.clientX - r.left - x0) / (x1 - x0)) * (b - a);
+      this.draw(null);
+      this.drawSpectra(this.reviewT);
+    };
     $('alSrc').onclick = (e) => { const b = e.target.closest('[data-src]'); if (b && !this.eng) this.setSource(b.dataset.src); };
     $('alYtLoad').onclick = () => this.loadYt($('alUrl').value);
     $('alUrl').onkeydown = (e) => { if (e.key === 'Enter') this.loadYt($('alUrl').value); };
@@ -103,7 +115,7 @@ export class AlongView {
       this.player?.destroy?.(); this.player = null;
       $('alYt').innerHTML = `<iframe src="${bili}" allow="autoplay; fullscreen" referrerpolicy="no-referrer-when-downgrade"></iframe>`;
       this.song = { name: 'Bilibili', yt: true, embedded: true, mel: { frames: [], notes: [], secs: 0 } };
-      this.user = []; this.result = null; $('alRes').innerHTML = '';
+      this.user = []; this.result = null; this.mic = null; this.reviewT = null; $('alRes').innerHTML = '';
       $('alStatus').textContent = L('B站视频载入了。戴上耳机，点“开始跟唱”，共享“这个标签页”和音频，再点视频上的 ▶ 播放。', 'Bilibili video loaded. Put on headphones, press “Sing along”, share “This tab” with its audio, then press ▶ on the video.');
       $('alGo').disabled = false;
       this.draw(0);
@@ -142,7 +154,7 @@ export class AlongView {
       $('alStatus').textContent = L('正在提取原唱的旋律…', 'Extracting the original’s melody…');
       const t = performance.now(), mel = await extractMelody(x, this.app.settings.a4).catch(() => { throw new Error(L('提取不出旋律', 'no melody could be extracted')); });
       if (mel.notes.length < 3) throw new Error(L('找不到明显的旋律（纯伴奏、打击乐或说话？）', 'no clear melody (backing only, percussion or speech?)'));
-      this.song = { name: file.name, buf, mel };
+      this.song = { name: file.name, buf, mel, x, sr: 44100 };
       this.user = []; this.result = null;
       $('alStatus').textContent = L(`“${file.name}”：${fmtT(mel.secs)}，找到 ${mel.notes.length} 个旋律音（${((performance.now() - t) / 1000).toFixed(1)} 秒）。戴上耳机，点“开始跟唱”。`, `“${file.name}”: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes found (${((performance.now() - t) / 1000).toFixed(1)} s). Put on headphones and press “Sing along”.`);
       $('alGo').disabled = false;
@@ -161,11 +173,12 @@ export class AlongView {
     if (this.app.live?.engine.running) { alert(L('请先结束“唱一段看问题”页面的录音。', 'Please stop the recording on the “Sing & check” page first.')); return; }
     const eng = new AudioEngine(), pt = new PitchTracker(S);
     let an = null;
-    this.user = []; this.result = null; $('alRes').innerHTML = '';
+    this.user = []; this.result = null; this.mic = null; this.reviewT = null; $('alRes').innerHTML = '';
     eng.onFrame = (frame, t) => {
       if (!an || this.eng !== eng || this.startMic == null) return;
       const st = pt.update(an.analyze(frame, { gateDb: S.gateDb, pitchOnly: true }), t);
       this.last = st;
+      this.keepMic(frame, t, eng.sampleRate);
       if (st.voiced) this.user.push({ t: t - this.startMic, midi: st.midi });
     };
     try { await eng.startMic({ deviceId: S.deviceId, record: false }); } catch (err) { alert(L(`麦克风错误：${err.message}`, `Microphone error: ${err.message}`)); return; }
@@ -196,6 +209,7 @@ export class AlongView {
       }
       const now = t - this.lag;
       this.draw(now);
+      if (!this.specAt || performance.now() - this.specAt > 100) { this.specAt = performance.now(); this.drawSpectra(now - 0.06); }
       $('alNow').innerHTML = this.nowHtml(this.refAt(now), this.last?.voiced ? this.last.f0 : 0);
       this.raf = requestAnimationFrame(tick);
     };
@@ -215,13 +229,14 @@ export class AlongView {
     }
     const eng = new AudioEngine(), pt = new PitchTracker(S);
     let an = null;
-    this.user = []; this.result = null; $('alRes').innerHTML = '';
+    this.user = []; this.result = null; this.mic = null; this.reviewT = null; $('alRes').innerHTML = '';
     this.song.mel = { frames: [], notes: [], secs: 0 };
     this.startMic = null;
     eng.onFrame = (frame, t) => {
       if (!an || this.eng !== eng || this.startMic == null) return;
       const st = pt.update(an.analyze(frame, { gateDb: S.gateDb, pitchOnly: true }), t);
       this.last = st;
+      this.keepMic(frame, t, eng.sampleRate);
       if (st.voiced) this.user.push({ t: t - this.startMic, midi: st.midi });
     };
     try { await eng.startMic({ deviceId: S.deviceId, record: false }); } catch (err) { tab.getTracks().forEach((t) => t.stop()); alert(L(`麦克风错误：${err.message}`, `Microphone error: ${err.message}`)); return; }
@@ -245,6 +260,7 @@ export class AlongView {
       if (this.eng !== eng) return;
       const now = eng.now() - this.startMic - this.lag;
       this.draw(now);
+      if (!this.specAt || performance.now() - this.specAt > 100) { this.specAt = performance.now(); this.drawSpectra(now - 0.06); }
       $('alNow').innerHTML = this.nowHtml(this.refAt(now), this.last?.voiced ? this.last.f0 : 0);
       this.raf = requestAnimationFrame(tick);
     };
@@ -303,7 +319,8 @@ export class AlongView {
     $('alStatus').textContent = L('正在分析整段原唱…', 'Analysing the whole of the original…');
     const per = T.chunks[0].length, x = new Float32Array(T.chunks.length * per);
     T.chunks.forEach((c, i) => x.set(c, i * per));
-    T.chunks = []; // not kept
+    T.chunks = [];
+    this.song.tabAudio = { x, sr: T.sr, offset: T.offset }; // in memory only, for the spectra; never stored
     try {
       const m = await extractMelody(await resampleTo44k(x, T.sr), this.app.settings.a4);
       const frames = m.frames.map((f) => ({ t: f.t + T.offset, midi: f.midi }));
@@ -326,6 +343,64 @@ export class AlongView {
     $('alStatus').textContent = L(`唱完了：录放延迟已自动校准（${Math.round(this.lag * 1000)} 毫秒）。`, `Done: the recording delay was lined up automatically (${Math.round(this.lag * 1000)} ms).`);
     this.renderResult();
     this.draw(null);
+  }
+
+  // the newest hop of microphone audio, kept (in memory) for the spectra
+  keepMic(frame, t, sr) {
+    const hop = 1024;
+    if (!this.mic) this.mic = { sr, chunks: [], t0: t + frame.length / (2 * sr) - hop / sr };
+    this.mic.chunks.push(frame.slice(frame.length - hop));
+  }
+
+  // N samples centred on `center` from a list of equal chunks (null if outside)
+  static windowOf(chunks, center, N = 4096) {
+    if (!chunks?.length) return null;
+    const per = chunks[0].length, start = Math.round(center - N / 2);
+    if (start < 0 || start + N > chunks.length * per) return null;
+    const out = new Float32Array(N);
+    for (let i = 0; i < N; i++) { const j = start + i; out[i] = chunks[Math.floor(j / per)][j % per]; }
+    return out;
+  }
+
+  // the spectra of the original and the singer at song time t
+  drawSpectra(t) {
+    const cv = this.root.querySelector('#alSpec');
+    if (!cv || !this.song || !Number.isFinite(t)) return;
+    const N = 4096, song = this.song;
+    // the original: the song file, or the shared tab's sound (kept, or still coming in)
+    let rx = null, rsr = 44100;
+    if (song.x) { rx = song.x.subarray(Math.max(0, Math.round(t * song.sr - N / 2)), Math.round(t * song.sr + N / 2)); rsr = song.sr; }
+    else if (song.tabAudio) { const A = song.tabAudio, c = (t - A.offset) * A.sr; rsr = A.sr; rx = A.x.subarray(Math.max(0, Math.round(c - N / 2)), Math.round(c + N / 2)); }
+    else if (this.tab?.offset != null) { rsr = this.tab.sr; rx = AlongView.windowOf(this.tab.chunks, (t - this.tab.offset) * rsr, N); }
+    // the singer: the microphone at the matching moment (the delay lined up)
+    let ux = null;
+    const M = this.mic;
+    if (M) ux = AlongView.windowOf(M.chunks, (t + this.lag + this.startMic - M.t0) * M.sr, N);
+    const near = (fr, tt, dt) => { let b = null; for (const f of fr) { if (Math.abs(f.t - tt) <= dt && (!b || Math.abs(f.t - tt) < Math.abs(b.t - tt))) b = f; } return b; };
+    const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+    const rf = near(song.mel.frames.filter((f) => Math.abs(f.t - t) < 0.05), t, 0.03), uf = near(this.user.filter((u) => Math.abs(u.t - this.lag - t) < 0.08).map((u) => ({ t: u.t - this.lag, midi: u.midi })), t, 0.05);
+    const rF0 = rf ? hz(rf.midi) : 0, uF0 = uf ? hz(uf.midi) : 0;
+    const rs = rx && rx.length === N ? spectrumAt(rx, rsr, N / 2, N) : null, us = ux ? spectrumAt(ux, M.sr, N / 2, N) : null;
+    const rel = pitchRelation(rF0, uF0);
+    const side = (spec, f0) => (spec ? { spec, f0, name: f0 ? midiName(Math.round(69 + 12 * Math.log2(f0 / 440))) : '', harm: harmonicsOf(spec, f0, 2500) } : null);
+    const user = side(us, uF0);
+    if (user && uF0) user.formants = formantsAt(ux, M.sr, N / 2 + Math.round(0.02 * M.sr), uF0);
+    drawSpectraPair(cv, { ref: side(rs, rF0), user, say: this.relationText(rel, rF0, uF0, t) });
+  }
+
+  relationText(rel, rF0, uF0, t) {
+    const at = `${fmtT(Math.max(0, t))}  `, nm = (f) => midiName(Math.round(69 + 12 * Math.log2(f / 440)));
+    if (!rF0 && !uF0) return at + L('这一刻原唱和你都没有音高', 'neither the original nor you have a pitch here');
+    if (!rF0) return at + L('原唱这一刻没有旋律（可能是伴奏或换气）', 'no melody in the original here (accompaniment or a breath)');
+    if (!uF0) return at + L(`原唱 ${nm(rF0)}，你这一刻没出声`, `original ${nm(rF0)}, you’re silent here`);
+    const c = rel.cents, cTxt = c === 0 ? '' : c > 0 ? L(`，再偏高 ${c} 音分`, `, then ${c} cents sharp`) : L(`，再偏低 ${-c} 音分`, `, then ${-c} cents flat`);
+    if (rel.octave) {
+      const n = Math.abs(rel.octave), lower = rel.octave < 0, pc = rel.refName.replace(/-?\d+$/, '');
+      return at + L(`你比原唱${lower ? '低' : '高'} ${n} 个八度${cTxt}：你的 F0 ${Math.round(uF0)} Hz ≈ 原唱 ${Math.round(rF0)} Hz 的 ${lower ? `1/${2 ** n}` : 2 ** n} 倍，${lower ? `你的第 ${2 ** n} 根谐波落在原唱的 F0 上` : `原唱的第 ${2 ** n} 根谐波落在你的 F0 上`}——音名一样（${pc}），只差八度`,
+        `You are ${n} octave${n > 1 ? 's' : ''} ${lower ? 'below' : 'above'} the original${cTxt}: your F0 ${Math.round(uF0)} Hz ≈ ${lower ? `1/${2 ** n}` : `${2 ** n}×`} its ${Math.round(rF0)} Hz; ${lower ? `your harmonic ${2 ** n}` : `its harmonic ${2 ** n}`} sits on ${lower ? 'its' : 'your'} F0 — the same note name (${pc}), octaves apart`);
+    }
+    if (rel.kind === 'same') return at + L(`和原唱同一个音 ${rel.refName}（差 ${Math.abs(c)} 音分）：两条 F0 对齐`, `the same note as the original, ${rel.refName} (${Math.abs(c)} cents apart): the F0s line up`);
+    return at + L(`比原唱${c > 0 ? '高' : '低'} ${Math.abs(c)} 音分：你的 F0 ${Math.round(uF0)} Hz，原唱 ${Math.round(rF0)} Hz（${rel.refName}）${rel.kind === 'off' ? '——超过半个半音，听得出来' : ''}`, `${Math.abs(c)} cents ${c > 0 ? 'sharp' : 'flat'} of the original: your F0 ${Math.round(uF0)} Hz, its ${Math.round(rF0)} Hz (${rel.refName})${rel.kind === 'off' ? ' — over half a semitone, audible' : ''}`);
   }
 
   // the original's note at song time t
@@ -372,8 +447,9 @@ export class AlongView {
       const ph = phrasesOf(this.user.map((u) => ({ t: u.t - this.lag, midi: u.midi })));
       ref = notes.map((n) => (n.t1 < now - 0.3 && coverOf(n, ph) < 0.5 ? { ...n, faint: true } : n));
     }
+    this.lastWin = win;
     drawAlong(cv, {
-      range, win, ref, now,
+      range, win, ref, now: now ?? this.reviewT ?? null,
       user: res ? res.user : this.user.map((u) => ({ t: u.t - this.lag, midi: u.midi })),
       mine: res ? res.mine : [], shift: res ? shift : liveShift, statusAt: statusOf,
     });
