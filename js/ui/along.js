@@ -39,7 +39,8 @@ const PRE_RATE = 1.5;
 // of memory reloads the page without a word ("a problem repeatedly
 // occurred"), and this says afterwards which step it was in
 const STEP_KEY = 'vocalassistant.along.step.v1';
-const markStep = (step, song) => { try { localStorage.setItem(STEP_KEY, JSON.stringify({ step, name: song?.name || '', at: Date.now() })); } catch { /* private mode */ } };
+let stepModel = '';
+const markStep = (step, song) => { try { localStorage.setItem(STEP_KEY, JSON.stringify({ step, name: song?.name || '', at: Date.now(), gpu: !!navigator.gpu, model: stepModel })); } catch { /* private mode */ } };
 const clearStep = () => { try { localStorage.removeItem(STEP_KEY); } catch { /* ignore */ } };
 const STEP_NAMES = () => ({ read: L('读取文件', 'reading the file'), record: L('录下原曲', 'recording the song'), model: L('载入人声分离模型', 'loading the vocal-separation model'), separate: L('分离人声', 'separating the vocal'), melody: L('提取旋律', 'extracting the melody') });
 
@@ -121,7 +122,10 @@ export class AlongView {
     try {
       const was = JSON.parse(localStorage.getItem(STEP_KEY) || 'null');
       clearStep();
-      if (was && Date.now() - was.at < 30 * 60e3) this.say(L(`上次分析“${was.name}”时，在“${STEP_NAMES()[was.step] || was.step}”这一步页面被系统关掉了（多半是内存不够）。`, `Last time, analysing “${was.name}”, the page was closed by the system while ${STEP_NAMES()[was.step] || was.step} (most likely out of memory).`));
+      if (was && Date.now() - was.at < 30 * 60e3) {
+        const dev = L(`这台设备${was.gpu ? '有' : '没有'} WebGPU${was.model ? `，用的是${was.model === 'split-fp16' ? ' 126 MB 小模型（GPU）' : ' 180 MB 大模型（CPU）'}` : ''}`, `this device ${was.gpu ? 'has' : 'has no'} WebGPU${was.model ? `, using the ${was.model === 'split-fp16' ? '126 MB small model (GPU)' : '180 MB large model (CPU)'}` : ''}`);
+        this.say(L(`上次分析“${was.name}”时，在“${STEP_NAMES()[was.step] || was.step}”这一步页面被系统关掉了（多半是内存不够；${dev}）。`, `Last time, analysing “${was.name}”, the page was closed by the system while ${STEP_NAMES()[was.step] || was.step} (most likely out of memory; ${dev}).`));
+      }
     } catch { /* ignore */ }
   }
 
@@ -595,7 +599,7 @@ export class AlongView {
     show(L('第 1 步：准备人声分离模型（Demucs）…', 'Step 1: getting the vocal-separation model (Demucs) ready…'), 0);
     try {
       const r = await separateVocals(x, {
-        onProgress: (d) => { anim.update(d); const { stage, progress, device } = d; markStep(stage === 'separate' ? 'separate' : 'model', song); show(
+        onProgress: (d) => { anim.update(d); const { stage, progress, device } = d; if (d.model) stepModel = d.model; markStep(stage === 'separate' ? 'separate' : 'model', song); show(
           stage === 'download' ? L(`第 1 步：下载人声分离模型（约 126 MB，只下载这一次）… ${pct(progress)}`, `Step 1: downloading the vocal-separation model (about 126 MB, this once only)… ${pct(progress)}`)
             : stage === 'load' ? L('第 1 步：载入人声分离模型…', 'Step 1: loading the vocal-separation model…')
             : L(`第 2 步：把原唱的人声和伴奏分开（${device === 'webgpu' ? 'GPU' : 'CPU，较慢'}）… ${pct(progress)}`, `Step 2: separating the original’s vocal from the band (${device === 'webgpu' ? 'GPU' : 'CPU, slower'})… ${pct(progress)}`),

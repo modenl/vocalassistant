@@ -81,6 +81,7 @@ async function load() {
   ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(8, navigator.hardwareConcurrency || 4) : 1;
   let gpu = false;
   try { gpu = !!(self.navigator.gpu && await self.navigator.gpu.requestAdapter()); } catch { /* none */ }
+  say({ stage: 'load', progress: 0, device: gpu ? 'webgpu' : 'wasm', model: gpu ? 'split-fp16' : 'full-fp32' });
   const errs = [];
   if (gpu) {
     try { model = await loadSplit(); device = 'webgpu'; return model; } catch (err) { errs.push(`webgpu: ${err?.message || err}`); }
