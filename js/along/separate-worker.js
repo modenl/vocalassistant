@@ -32,7 +32,6 @@ const CPU_NODES = ['/ReduceMean', '/Sub', '/Pow', '/ReduceMean_1', '/Clip', '/Sq
 
 let model = null, device = '', ort = null;
 const say = (m) => self.postMessage(m);
-const wlog = (event, data = {}) => self.postMessage({ log: { event, ...data } }); // diagnostics (js/dlog.js)
 
 // a file's bytes: from the cache, else downloaded (progress: onBytes(n)) and cached
 async function fetchBytes(url, onBytes = () => {}) {
@@ -54,24 +53,20 @@ async function fetchBytes(url, onBytes = () => {}) {
 }
 
 // the 21 pieces, loaded one by one; what each run feeds forward is freed after its last use
-// gpuIO: what one piece hands the next stays on the GPU (fast; Chrome). Off:
-// it goes through the CPU — for WebKit, whose WebGPU froze the whole page on
-// the second segment with it on (Safari 27 on a Mac; an iPhone was closed)
+// gpuIO: what one piece hands the next stays on the GPU (fast). Off: through
+// the CPU (tried for WebKit's WebGPU; the iPhone still closed the page)
 async function loadSplit(gpuIO = true) {
   const manifest = JSON.parse(new TextDecoder().decode(await fetchBytes(`${SPLIT}htdemucs_split_manifest.json`)));
   let got = 0;
   const pieces = [];
   for (const [i, p] of manifest.pieces.entries()) {
     let bytes = await fetchBytes(`${SPLIT}${p.file}`, (n) => { got += n; say({ stage: 'download', progress: Math.min(1, got / SPLIT_BYTES), bytes: got, total: SPLIT_BYTES }); });
-    wlog('piece-bytes', { i, mb: +(bytes.length / 1e6).toFixed(1) });
-    const t0 = performance.now();
     const session = await ort.InferenceSession.create(bytes, {
       executionProviders: [i === 0 ? { name: 'webgpu', forceCpuNodeNames: CPU_NODES } : 'webgpu'],
       graphOptimizationLevel: 'all', ...(gpuIO ? { preferredOutputLocation: 'gpu-buffer' } : {}),
     });
     bytes = null; // only the GPU keeps it
     pieces.push({ ...p, session });
-    wlog('piece-session', { i, ms: Math.round(performance.now() - t0) });
   }
   const last = {};
   pieces.forEach((p, i) => p.inputs.forEach((n) => { last[n] = i; }));
@@ -101,8 +96,8 @@ async function loadFull(ep = 'wasm') {
 // fp32 alike; there the CPU runs Open-Unmix
 const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\/|Edg\//.test(navigator.userAgent);
 
-// variant (tools/sep-test.html, to find what WebKit's WebGPU can run):
-// 'split-gpu' | 'full-gpu' | 'full-cpu'; default: the best this browser allows
+// variant (tools/speedtest.js): 'umx' | 'split-gpu' | 'split-gpu-cpuio' |
+// 'full-gpu' | 'full-cpu'; default: the best this browser allows
 async function load(forceCpu = false, variant = '') {
   if (model) return model;
   ort = await import(`${ORT}ort.webgpu.min.mjs`);
@@ -113,25 +108,21 @@ async function load(forceCpu = false, variant = '') {
   try {
     const ad = self.navigator.gpu && await self.navigator.gpu.requestAdapter();
     gpu = !!ad;
-    if (ad) wlog('adapter', { vendor: ad.info?.vendor, arch: ad.info?.architecture, maxBuffer: ad.limits?.maxBufferSize, maxStorage: ad.limits?.maxStorageBufferBindingSize });
-  } catch (err) { wlog('adapter-error', { msg: String(err?.message || err) }); }
+  } catch { /* none */ }
   if (variant) {
-    wlog('variant', { variant });
     if (variant === 'umx') { model = await loadUmx(); device = 'wasm'; }
     else if (variant === 'split-gpu' || variant === 'split-gpu-cpuio') { model = await loadSplit(variant === 'split-gpu'); device = 'webgpu'; }
     else { model = await loadFull(variant === 'full-gpu' ? 'webgpu' : 'wasm'); device = variant === 'full-gpu' ? 'webgpu' : 'wasm'; }
-    wlog('model-ready', { variant });
     return model;
   }
-  if (gpu && (WEBKIT || forceCpu)) { wlog('gpu-skipped', { webkit: WEBKIT, forced: forceCpu }); gpu = false; }
-  wlog('ort-ready', { gpu, threads: ort.env.wasm.numThreads });
+  if (WEBKIT || forceCpu) gpu = false;
   say({ stage: 'load', progress: 0, device: gpu ? 'webgpu' : 'wasm', model: gpu ? 'split-fp16' : 'umx-hq' });
   const errs = [];
   if (gpu) {
-    try { model = await loadSplit(); device = 'webgpu'; wlog('model-ready', { model: 'split-fp16' }); return model; } catch (err) { errs.push(`webgpu: ${err?.message || err}`); wlog('split-error', { msg: String(err?.message || err).slice(0, 300) }); }
+    try { model = await loadSplit(); device = 'webgpu'; return model; } catch (err) { errs.push(`webgpu: ${err?.message || err}`); }
   }
   // no usable WebGPU: Open-Unmix on the CPU (Demucs there: about 2× slower than the song)
-  try { model = await loadUmx(); device = 'wasm'; wlog('model-ready', { model: 'umx-hq' }); return model; } catch (err) { errs.push(`wasm: ${err?.message || err}`); wlog('umx-error', { msg: String(err?.message || err).slice(0, 300) }); }
+  try { model = await loadUmx(); device = 'wasm'; return model; } catch (err) { errs.push(`wasm: ${err?.message || err}`); }
   throw new Error(errs.join(' | '));
 }
 
@@ -172,9 +163,7 @@ async function separate(x) {
     let t = performance.now();
     const inp = prepareModelInput(seg, seg);
     tCpu += performance.now() - t; t = performance.now();
-    wlog('segment-start', { k, of: segs });
     const { td, fd } = await runSegment(model, inp.waveform, inp.magSpec, S, B, F);
-    wlog('segment-done', { k, ms: Math.round(performance.now() - t) });
     tGpu += performance.now() - t; t = performance.now();
     // the vocal's spectrogram (left channel), padded as demucs-web's standaloneIspec, back to time
     let fv = null;
@@ -218,7 +207,6 @@ async function separateUmx(x) {
       const i = f * NB + b, m = Math.hypot(S.real[i], S.imag[i]) * sc;
       mag[b * F + f] = m; mag[NB * F + b * F + f] = m; // the same sound on both channels
     }
-    wlog('segment-start', { k, of: segs });
     const t0 = performance.now(), r = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', mag, [1, 2, NB, F]) });
     tRun += performance.now() - t0;
     const est = r[s.outputNames[0]].data;
@@ -234,7 +222,6 @@ async function separateUmx(x) {
     }
     const BIN = 441, nb = Math.ceil(len / BIN), ve = new Float32Array(nb), be = new Float32Array(nb);
     for (let i = 0; i < len; i++) { const j = (i / BIN) | 0, a = Math.abs(v[i]), b = Math.abs(seg[i] - v[i]); if (a > ve[j]) ve[j] = a; if (b > be[j]) be[j] = b; }
-    wlog('segment-done', { k, ms: Math.round(performance.now() - t0) });
     self.postMessage({ stage: 'separate', progress: ++k / segs, device, part: { start, ve, be, bin: BIN } }, [ve.buffer, be.buffer]);
     if (start + len >= n) break;
   }
@@ -252,12 +239,11 @@ async function release() {
 }
 
 self.onmessage = async (e) => {
-  if (e.data.release) { await release(); wlog('released'); self.postMessage({ released: true }); return; }
-  wlog('job', { secs: +(e.data.x.length / 44100).toFixed(1) });
+  if (e.data.release) { await release(); self.postMessage({ released: true }); return; }
   try {
     say({ stage: 'load', progress: 0 });
     await load(!!e.data.cpu, e.data.variant || '');
     const t0 = performance.now(), r = model.umx ? await separateUmx(e.data.x) : await separate(e.data.x);
     self.postMessage({ ...r, device, model: model.umx ? 'umx-hq' : model.split ? 'split-fp16' : 'full-fp32', secs: (performance.now() - t0) / 1000 }, [r.vocals.buffer]);
-  } catch (err) { wlog('error', { msg: String(err?.message || err).slice(0, 300) }); say({ error: String(err?.message || err) }); }
+  } catch (err) { say({ error: String(err?.message || err) }); }
 };

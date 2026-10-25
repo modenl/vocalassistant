@@ -4,8 +4,6 @@
 //   const { vocals, device, secs } = await separateVocals(x, { onProgress: ({ stage, progress }) => … })
 // x: Float32Array mono at 44.1 kHz → vocals: the same length; device: 'webgpu' | 'wasm'
 
-import { dlog } from '../dlog.js';
-
 let worker = null, pending = null;
 
 // Which model the worker will pick (it decides; the page needs to know before,
@@ -29,12 +27,11 @@ export async function separateVocals(x, { onProgress, cpu = false, variant = sep
     const done = (fn, v) => { pending = null; fn(v); };
     worker.onmessage = (e) => {
       const d = e.data;
-      if (d.log) { dlog(`w.${d.log.event}`, d.log); return; }
       if (d.error) done(reject, new Error(d.error));
       else if (d.vocals) done(resolve, d);
       else if (!d.released) onProgress?.(d);
     };
-    worker.onerror = (e) => { dlog('worker-onerror', { msg: String(e.message) }); releaseSeparator(); done(reject, new Error(e.message || 'separation failed')); };
+    worker.onerror = (e) => { releaseSeparator(); done(reject, new Error(e.message || 'separation failed')); };
     const copy = Float32Array.from(x);
     worker.postMessage({ x: copy, cpu, variant }, [copy.buffer]);
   });
