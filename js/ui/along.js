@@ -35,6 +35,14 @@ import { L } from '../i18n.js';
 // at 2× — Demucs was trained on music at its real tempo (tools/speedtest.js)
 const PRE_RATE = 1.5;
 
+// The analysis step being run, kept in localStorage: a phone that runs out
+// of memory reloads the page without a word ("a problem repeatedly
+// occurred"), and this says afterwards which step it was in
+const STEP_KEY = 'vocalassistant.along.step.v1';
+const markStep = (step, song) => { try { localStorage.setItem(STEP_KEY, JSON.stringify({ step, name: song?.name || '', at: Date.now() })); } catch { /* private mode */ } };
+const clearStep = () => { try { localStorage.removeItem(STEP_KEY); } catch { /* ignore */ } };
+const STEP_NAMES = () => ({ read: L('读取文件', 'reading the file'), record: L('录下原曲', 'recording the song'), model: L('载入人声分离模型', 'loading the vocal-separation model'), separate: L('分离人声', 'separating the vocal'), melody: L('提取旋律', 'extracting the melody') });
+
 const fmtT = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 const centsTxt = (c) => (c === 0 ? L('正好', 'spot on') : c > 0 ? L(`高 ${c} 音分`, `${c} cents sharp`) : L(`低 ${-c} 音分`, `${-c} cents flat`));
 const octTxt = (k) => (k === 0 ? '' : k < 0 ? L(`低 ${-k} 个八度`, `${-k} octave${k < -1 ? 's' : ''} lower`) : L(`高 ${k} 个八度`, `${k} octave${k > 1 ? 's' : ''} higher`));
@@ -47,7 +55,7 @@ export class AlongView {
     this.song = null;   // { name, yt?, buf?, x?, mel: { frames, notes, secs }, vox?, ready }
     this.user = [];     // the singer's pitch: { t (song time), midi }
     this.result = null;
-    this.busy = false;  // analysing: every control greyed out
+    this.busy = false; clearStep();  // analysing: every control greyed out
     this.keyMode = 'auto';  // compare in: 'auto' | 'relative' (the singer's key) | 'absolute' (the original's)
   }
 
@@ -110,6 +118,11 @@ export class AlongView {
     this.say(canCaptureTab() ? L('第一步：粘贴 YouTube / B站链接点“① 分析”（其他网站留空），或者导入歌曲 / 视频文件（mp3、m4a、wav、mp4、mov…）。', 'Step one: paste a YouTube / Bilibili link and press “① Analyse” (other sites: leave it empty), or import a song / video file (mp3, m4a, wav, mp4, mov…).') : L('第一步：导入歌曲 / 视频文件（mp3、m4a、wav、mp4、mov…）。这个浏览器不能分析网页里的视频（要电脑版 Chrome / Edge）。', 'Step one: import a song / video file (mp3, m4a, wav, mp4, mov…). This browser can’t analyse videos on web pages (desktop Chrome / Edge needed).'));
     this.controls();
     this.draw();
+    try {
+      const was = JSON.parse(localStorage.getItem(STEP_KEY) || 'null');
+      clearStep();
+      if (was && Date.now() - was.at < 30 * 60e3) this.say(L(`上次分析“${was.name}”时，在“${STEP_NAMES()[was.step] || was.step}”这一步页面被系统关掉了（多半是内存不够）。`, `Last time, analysing “${was.name}”, the page was closed by the system while ${STEP_NAMES()[was.step] || was.step} (most likely out of memory).`));
+    } catch { /* ignore */ }
   }
 
   get $() { return (id) => this.root.querySelector('#' + id); }
@@ -157,7 +170,7 @@ export class AlongView {
     this.busy = true; this.result = null; this.user = []; this.reviewT = null; $('alRes').innerHTML = '';
     const song = (this.song = { name: `YouTube ${id}`, yt: true, mel: { frames: [], notes: [], secs: 0 } });
     this.controls();
-    const fail = (t) => { tab.getTracks().forEach((k) => k.stop()); this.busy = false; if (this.song === song) this.song = null; this.say(t); this.controls(); this.draw(0); };
+    const fail = (t) => { tab.getTracks().forEach((k) => k.stop()); this.busy = false; clearStep(); if (this.song === song) this.song = null; this.say(t); this.controls(); this.draw(0); };
     this.say(L('正在载入视频…', 'Loading the video…'));
     try {
       this.player?.destroy?.();
@@ -185,6 +198,7 @@ export class AlongView {
     }, 100);
     tab.getAudioTracks()[0].onended = () => ended();
     const box = $('alSep');
+    markStep('record', song);
     box.className = 'al-sep busy'; box.querySelector('.al-sep-t').textContent = L(`第 1 步：视频以 ${rate} 倍速放一遍，录下它的声音（只在内存里）`, `Step 1: the video plays once at ${rate}× while its sound is recorded (in memory only)`);
     this.say(L(`正在分析，请稍候，分析完才能开始唱（一首 4 分钟的歌约 ${Math.round(4 / rate + 1.5)} 分钟）…`, `Analysing — please wait; singing starts once it’s done (about ${Math.round(4 / rate + 1.5)} min for a 4-minute song)…`));
     try { P.seekTo(0, true); P.setPlaybackRate(rate); P.playVideo(); } catch { /* it will be caught by the timeout below */ }
@@ -206,7 +220,7 @@ export class AlongView {
       if (this.song !== song) return;
       this.say(L(`分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音。戴上耳机，点“② 开始跟唱”（视频从头原速播放）。`, `Analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes. Put on headphones and press “② Sing along” (the video plays from the start, normal speed).`));
     } catch (err) { if (this.song === song) this.song = null; this.say(L(`分析失败：${err.message}。再点一次“① 分析”。`, `The analysis failed: ${err.message}. Press “① Analyse” again.`)); }
-    this.busy = false; this.controls(); this.draw(0);
+    this.busy = false; clearStep(); this.controls(); this.draw(0);
   }
 
   // the previous song's player and shared sound let go
@@ -259,6 +273,7 @@ export class AlongView {
     };
     tab.getAudioTracks()[0].onended = () => ended();
     const box = $('alSep');
+    markStep('record', song);
     box.className = 'al-sep busy'; box.querySelector('.al-sep-t').textContent = L('第 1 步：录下原曲（只在内存里）', 'Step 1: recording the song (in memory only)');
     box.querySelector('.fill').style.width = '0%';
     this.say(embed ? L('现在点视频上的 ▶，从头原速播放一遍——只是给程序分析，不用唱。播完停 4 秒会自动结束，之后才能唱。', 'Now press ▶ on the video and play it once from the start at normal speed — only for the analysis, don’t sing yet. It ends by itself after 4 s of silence; then you can sing.')
@@ -266,7 +281,7 @@ export class AlongView {
     await done;
     node.port.onmessage = null; ctx.close();
     if (this.song !== song) { anim.stop(); tab.getTracks().forEach((k) => k.stop()); return; }
-    const fail = (t) => { anim.stop(); scroll.style.display = ''; acv.style.display = 'none'; box.className = 'al-sep'; box.querySelector('.al-sep-t').textContent = ''; tab.getTracks().forEach((k) => k.stop()); this.song = null; this.busy = false; this.say(t); this.controls(); this.draw(0); };
+    const fail = (t) => { anim.stop(); scroll.style.display = ''; acv.style.display = 'none'; box.className = 'al-sep'; box.querySelector('.al-sep-t').textContent = ''; tab.getTracks().forEach((k) => k.stop()); this.song = null; this.busy = false; clearStep(); this.say(t); this.controls(); this.draw(0); };
     // the silence at the end isn't part of the song
     const keep = Math.max(0, n - quiet + Math.round(0.5 * sr));
     if (keep < 5 * sr) { fail(L('没录到歌（不到 5 秒）：没放起来，或者共享时没打开“同时分享标签页音频”。再点一次“① 分析”。', 'No song recorded (under 5 s): it didn’t play, or “Also share tab audio” was off. Press “① Analyse” again.')); return; }
@@ -279,7 +294,7 @@ export class AlongView {
       if (this.song !== song) return;
       this.say(L(`分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音。戴上耳机，点“② 开始跟唱”，再从头播放（原速）——程序会自己听出播到哪里。`, `Analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes. Put on headphones, press “② Sing along”, then play it from the start (normal speed) — the app hears where it is.`));
     } catch (err) { if (this.song === song) { tab.getTracks().forEach((k) => k.stop()); this.song = null; } this.say(L(`分析失败：${err.message}。再点一次“① 分析”。`, `The analysis failed: ${err.message}. Press “① Analyse” again.`)); }
-    this.busy = false; this.controls(); this.draw(0);
+    this.busy = false; clearStep(); this.controls(); this.draw(0);
   }
 
   // ① a song or video file: its sound decoded, then analysed. A video's
@@ -297,6 +312,7 @@ export class AlongView {
     }
     this.controls();
     this.say(L(`正在读取“${file.name}”…`, `Reading “${file.name}”…`));
+    markStep('read', song);
     try {
       const tmp = new AudioContext();
       const { buf, x } = await decodeSong(file, tmp);
@@ -316,7 +332,7 @@ export class AlongView {
       const msg = /decod|EncodingError|Unable/i.test(`${err.name} ${err.message}`) ? L('读不出它的声音（换成 mp4 / mov / mp3 试试）', 'its sound can’t be read (try an mp4 / mov / mp3)') : err.message;
       this.say(L(`分析不了这个文件：${msg}`, `Can’t analyse this file: ${msg}`));
     }
-    this.busy = false; this.controls(); this.draw(0);
+    this.busy = false; clearStep(); this.controls(); this.draw(0);
   }
 
   // ② singing along (only with a song fully analysed)
@@ -579,8 +595,8 @@ export class AlongView {
     show(L('第 1 步：准备人声分离模型（Demucs）…', 'Step 1: getting the vocal-separation model (Demucs) ready…'), 0);
     try {
       const r = await separateVocals(x, {
-        onProgress: (d) => { anim.update(d); const { stage, progress, device } = d; show(
-          stage === 'download' ? L(`第 1 步：下载人声分离模型（约 180 MB，只下载这一次）… ${pct(progress)}`, `Step 1: downloading the vocal-separation model (about 180 MB, this once only)… ${pct(progress)}`)
+        onProgress: (d) => { anim.update(d); const { stage, progress, device } = d; markStep(stage === 'separate' ? 'separate' : 'model', song); show(
+          stage === 'download' ? L(`第 1 步：下载人声分离模型（约 126 MB，只下载这一次）… ${pct(progress)}`, `Step 1: downloading the vocal-separation model (about 126 MB, this once only)… ${pct(progress)}`)
             : stage === 'load' ? L('第 1 步：载入人声分离模型…', 'Step 1: loading the vocal-separation model…')
             : L(`第 2 步：把原唱的人声和伴奏分开（${device === 'webgpu' ? 'GPU' : 'CPU，较慢'}）… ${pct(progress)}`, `Step 2: separating the original’s vocal from the band (${device === 'webgpu' ? 'GPU' : 'CPU, slower'})… ${pct(progress)}`),
           stage === 'load' ? 1 : progress); },
@@ -596,6 +612,7 @@ export class AlongView {
     if (this.song !== song) { anim.stop(); return song.mel; }
     if (!vox) { back(); show(L(`人声分离失败（${why}）`, `Vocal separation failed (${why})`), null, 'warn'); throw new Error(L(`人声分离失败（${why}）`, `vocal separation failed (${why})`)); }
     show(L('第 3 步：从人声里提取原唱的旋律…', 'Step 3: extracting the original’s melody from the vocal…'), 1);
+    markStep('melody', song);
     anim.update({ stage: 'melody' });
     const m = await extractMelody(vox, this.app.settings.a4, { rate }).catch(() => { back(); throw new Error(L('提取不出旋律', 'no melody could be extracted')); });
     if (m.notes.length < 3) { back(); show('', null, ''); throw new Error(L('找不到明显的旋律（纯伴奏、打击乐或说话？）', 'no clear melody (backing only, percussion or speech?)')); }
@@ -608,6 +625,7 @@ export class AlongView {
     back();
     song.vox = { x: vox, sr: 44100, offset, scale };
     song.ready = true;
+    clearStep();
     show(L(`✓ 分析完成（${why}），模型已卸载`, `✓ Analysed (${why}), model unloaded`), null, 'ok');
     return song.mel;
   }
