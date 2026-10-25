@@ -1,18 +1,18 @@
-// Five dimensions of a singing take — 音准 · 节奏 · 气息 · 技巧 · 表现力 — all
-// judged without a score or a reference recording, from the pitch and level
-// streams only. Each dimension is made of checks; every check has a status,
+// Five dimensions of a singing take — 音准 · 共鸣 · 气息 · 技巧 · 表现力 — all
+// judged without a score or a reference recording, from the pitch, level and
+// a little of the spectrum. Each dimension is made of checks; every check has a status,
 // a 0–100 score with a published rule (\`how\`), and a concrete next step:
 //   音准   intonation (notes vs the singer's own tuning) · keyDrift (越唱越低/高)
-//   节奏   beat (evenness of the most common note length) · tempo (越唱越快/慢)
+//   共鸣   ring (singer's formant, 2–4 kHz) · ringHigh (does it hold up high)
 //   气息   stability (long notes) · tail (句尾掉音)
 //   技巧   breaks (断档) · shout (喊唱) · scoop (挑音) · vibrato (颤音)
 //   表现力 dynamics (phrase-to-phrase loudness contrast)
 // plus the range sung.
 
 import { VibratoAnalyzer } from './vibrato.js';
-import { rhythmOf, meterOf } from './rhythm.js';
 import { midiName, median } from '../config.js';
 import { L } from '../i18n.js';
+import { ref } from '../refs.js';
 
 const MA_WIN = 0.4;       // s — about two vibrato cycles: smooths vibrato for note tracking
 const NOTE_TOL = 0.6;     // semitones the smoothed pitch may wander before a new note starts
@@ -24,8 +24,9 @@ export class SingingMetrics {
   constructor() {
     this.notes = [];
     this.breaks = [];
-    this.frames = { t: [], midi: [], db: [] };
+    this.frames = { t: [], midi: [], db: [], spr: [], hiPk: [], hiMed: [], vdb: [], out: [] };
     this.voicedTime = 0;
+    this.outsideTime = 0; // pitched sound far below the voice type: not the singer
     this.cur = null;
     this.prev = null;
     this.runStart = null;
@@ -37,9 +38,11 @@ export class SingingMetrics {
   // st: PitchTracker output
   push(st) {
     const F = this.frames;
-    F.t.push(st.t); F.midi.push(st.voiced ? st.midi : NaN); F.db.push(st.db);
+    F.t.push(st.t); F.midi.push(st.voiced ? st.midi : NaN); F.db.push(st.db); F.out.push(st.outside ? 1 : 0);
+    F.spr.push(st.voiced && Number.isFinite(st.spr) ? st.spr : NaN); F.hiPk.push(st.voiced && Number.isFinite(st.hiPk) ? st.hiPk : NaN); F.hiMed.push(Number.isFinite(st.hiMed) ? st.hiMed : NaN); F.vdb.push(st.voiced && Number.isFinite(st.vdb) ? st.vdb : NaN);
     const prev = this.prev;
     const dt = prev ? Math.min(0.1, st.t - prev.t) : 0;
+    if (st.outside) this.outsideTime += dt;
     // confirm break candidates once 0.2 s of what follows is known
     this.recent.push({ t: st.t, v: st.voiced, midi: st.midi, db: st.db });
     while (this.recent.length && st.t - this.recent[0].t > 0.8) this.recent.shift();
@@ -74,7 +77,7 @@ export class SingingMetrics {
     // note tracking on the smoothed pitch
     const c = this.cur;
     if (c) {
-      c.fr.push({ t: st.t, midi: st.midi, raw: st.raw, db: st.db });
+      c.fr.push({ t: st.t, midi: st.midi, raw: st.raw, db: st.db, vdb: st.vdb });
       const sm = this.smoothed(c);
       c.sm.push(sm);
       if (c.fr.length > 6 && Math.abs(sm - median(c.sm)) > NOTE_TOL) {
@@ -84,7 +87,7 @@ export class SingingMetrics {
         this.cur = { fr: moved, sm: moved.map((f) => f.midi), lastT: st.t };
       } else c.lastT = st.t;
     } else {
-      this.cur = { fr: [{ t: st.t, midi: st.midi, raw: st.raw, db: st.db }], sm: [st.midi], lastT: st.t };
+      this.cur = { fr: [{ t: st.t, midi: st.midi, raw: st.raw, db: st.db, vdb: st.vdb }], sm: [st.midi], lastT: st.t };
     }
     this.prev = st;
     return brk;
@@ -109,9 +112,14 @@ export class SingingMetrics {
     if (pre.length < 4 || post.length < 4) return null;
     // lasting steps: medians after vs before
     const dbPre = median(pre.map((f) => f.db)), dbPost = median(post.map((f) => f.db));
-    const dM = median(post.map((f) => f.midi)) - median(pre.map((f) => f.midi));
+    const mPre = median(pre.map((f) => f.midi)), mPost = median(post.map((f) => f.midi));
+    const dM = mPost - mPre;
     const dDb = dbPost - dbPre;
     if (Math.abs(dM) < 1.5 || Math.abs(dDb) < 5 || Math.sign(dM) === Math.sign(dDb)) return null;
+    // registers only change hands around the passaggi: chest ↔ falsetto / head
+    // happens above ≈ A3 (220 Hz) in men and women alike. A leap lower down, with
+    // the phrase getting softer or louder, is melody, not a flip.
+    if (Math.max(mPre, mPost) < 57) return null;
     // no dip: between syllables the level falls below BOTH neighbours (a
     // consonant, voiced or not); across a flip it goes straight from one to the other
     const mid = this.recent.filter((f) => f.t > c.t - 0.12 && f.t < c.t + 0.08);
@@ -165,9 +173,9 @@ export class SingingMetrics {
     const slope = sxx ? sxy / sxx : 0; // semitones per second
     const note = {
       t0, t1, dur, midi: center, target, name: midiName(target), cents: (center - target) * 100,
-      db: median(core.map((f) => f.db)), held: Math.abs(slope) < 1.2, steady: range <= 0.7 && Math.abs(slope) < 1.2, slope, drift: dur >= 0.8 ? range * 100 : NaN, vib: null,
+      db: median(core.map((f) => f.db)), vdb: median(core.map((f) => f.vdb)), held: Math.abs(slope) < 1.2, steady: range <= 0.7 && Math.abs(slope) < 1.2, slope, drift: dur >= 0.8 ? range * 100 : NaN, vib: null,
     };
-    if (dur >= 1.0) {
+    if (dur >= 0.75) {
       const va = new VibratoAnalyzer();
       for (const f of core) va.push(f.t, (f.raw ?? f.midi) * 100);
       note.vib = va.analyze();
@@ -198,20 +206,24 @@ export class SingingMetrics {
   // ---------------------------------------------------------------- summary
   summary() {
     const notes = this.notes.filter((n) => n.steady);
-    const R = rhythmOf(this.frames, this.notes);
-    // the meter heard in the singing (preferred); note-by-note timing is the fallback
-    R.meter = meterOf(this.frames);
-    R.metered = !!(R.meter?.found && R.onsets.length >= 16 && R.meter.windows >= 4);
     // the note being sung right now counts towards the progress of the
     // not-yet-judged checks (never towards a judgement)
     const cur = this.currentNote();
+    // Music besides the voice (a song played through a speaker, a backing
+    // track): the tracker keeps finding pitches far below the voice type — a
+    // quarter of the pitched time in a song played into the microphone, ≤ 0.3 %
+    // in a cappella takes. Then the spectrum isn't the voice's alone: ring and
+    // dynamics aren't judged (they would describe the band, not the singer).
+    const share = this.outsideTime / Math.max(1e-9, this.outsideTime + this.voicedTime);
+    const accomp = { share, detected: share >= 0.08 && this.outsideTime >= 1 };
     const M = {
+      accomp,
       voicedTime: this.voicedTime,
       noteCount: notes.length,
       intonation: intonation(notes, cur),
       keyDrift: keyDrift(notes, cur),
-      beat: beat(R),
-      tempo: tempo(R),
+      ring: accomp.detected ? accompNa(ring(this.frames)) : ring(this.frames),
+      ringHigh: accomp.detected ? accompNa(ringHigh(this.frames)) : ringHigh(this.frames),
       // every held (non-glide) note, including the ones that drift
       stability: stability(this.notes.filter((n) => n.held), cur),
       tail: tail(this.notes, this.frames),
@@ -219,7 +231,7 @@ export class SingingMetrics {
       shout: shout(notes, cur),
       scoop: scoop(this.frames),
       vibrato: vibrato(notes, cur),
-      dynamics: dynamics(this.notes, this.voicedTime),
+      dynamics: accomp.detected ? accompNa(dynamics(this.notes, this.voicedTime)) : dynamics(this.notes, this.voicedTime),
       range: range(notes),
     };
     M.dims = dimsOf(M);
@@ -246,7 +258,7 @@ export class SingingMetrics {
 // least 15 s of singing).
 export const DIMS = [
   { key: 'pitch', title: L('音准', 'Pitch'), sub: L('音与音之间准不准（按你自己的调判断），整体有没有越唱越低 / 高', 'Are the notes in tune with each other (judged against your own key), and does the whole thing sink or rise'), checks: [['intonation', 3], ['keyDrift', 1]] },
-  { key: 'rhythm', title: L('节奏', 'Rhythm'), sub: L('按你自己的拍子判断：同样长的音唱得匀不匀，速度有没有越来越快 / 慢', 'Judged against your own beat: are equal notes equally long, do you speed up or slow down'), checks: [['beat', 1], ['tempo', 1]] },
+  { key: 'resonance', title: L('共鸣', 'Resonance'), sub: L('穿透力：声音亮不亮、传不传得远（看 2–4 kHz 这段有多强），往高唱时能不能保持', 'Does the voice have “ring” (the singer’s formant, 2–4 kHz), and does it hold up high'), checks: [['ring', 2], ['ringHigh', 1]] },
   { key: 'breath', title: L('气息', 'Breath'), sub: L('长音稳不稳，句尾有没有掉下来', 'Are long notes steady, do phrase endings sink'), checks: [['stability', 1], ['tail', 1]] },
   { key: 'technique', title: L('技巧', 'Technique'), sub: L('有没有技术毛病：断档、喊唱、挑音、颤音问题', 'Technical faults: breaks, shouting, scooping, vibrato problems'), checks: [['breaks', 1], ['shout', 1], ['scoop', 1], ['vibrato', 1]] },
   { key: 'expression', title: L('表现力', 'Expression'), sub: L('有没有强弱变化（感情对不对，要你和听众来判断）', 'Is there any loud–soft contrast (whether the emotion is right is for you and your listeners to judge)'), checks: [['dynamics', 1]] },
@@ -426,7 +438,7 @@ const VIB = {
 function vibrato(notes, cur) {
   const out = { rank: 9, lesson: 'vibrato', title: L('颤音', 'Vibrato'), how: L('有毛病（太快、太慢、太宽）的颤音占多少：0% 满分，30% 75 分，50% 60 分；直音不扣分', 'share of faulty vibrato (too fast, slow or wide): 0% = 100, 30% = 75, 50% = 60; straight tone costs nothing') };
   const long = notes.filter((n) => n.vib);
-  if (long.length < 2) return na(out, L('唱几个 1 秒以上的长音才能判断', 'Sing a few notes of 1 s or longer'), ...soFar(long.length, 2, cur?.dur >= 1, ' 1 秒以上的长音', 'notes of 1 s or longer'));
+  if (long.length < 2) return na(out, L('唱几个 0.8 秒以上的长音才能判断', 'Sing a few notes of 0.8 s or longer'), ...soFar(long.length, 2, cur?.dur >= 0.75, ' 0.8 秒以上的长音', 'notes of 0.8 s or longer'));
   const count = {};
   for (const n of long) count[n.vib.type] = (count[n.vib.type] || 0) + 1;
   // irregular pitch movement is often ornamentation in pop — not counted as a problem
@@ -463,15 +475,28 @@ function keyDrift(notes, cur) {
     const [p, left] = soFar(notes.length, 12, cur?.dur >= 0.3, '稳定的音', 'steady notes');
     return na(out, L('唱 20 秒以上才能判断', 'Needs 20 s or more of singing'), Math.min(p, sung / 20), sung < 20 ? L(`再唱约 ${Math.ceil(20 - sung)} 秒`, `about ${Math.ceil(20 - sung)} s more`) : left);
   }
-  const offs = [];
-  for (const n of notes) {
-    const near = notes.filter((x) => Math.abs(x.t0 - n.t0) <= 5);
-    let o = circMeanCents(near.map((x) => ({ cents: x.cents, w: x.dur })));
-    if (offs.length) o += 100 * Math.round((offs[offs.length - 1] - o) / 100); // unwrap
-    offs.push(o);
+  // The singer's tuning along the take: circular mean of the notes' cents in
+  // 6-s windows (every 3 s), each window's notes agreeing on one tuning; the
+  // windows are unwrapped one to the next, so a gradual drift past ±50 cents is
+  // followed, while one note's noise can't flip the whole estimate (unwrapping
+  // note by note did: near ±50 it added a whole semitone). Drift = the last
+  // windows vs the first ones.
+  const T0 = notes[0].t0, T1 = notes[notes.length - 1].t0;
+  const tune = (ns) => {
+    let s = 0, c = 0, w = 0;
+    for (const n of ns) { const a = (n.cents / 100) * 2 * Math.PI; s += n.dur * Math.sin(a); c += n.dur * Math.cos(a); w += n.dur; }
+    return { o: (Math.atan2(s, c) / (2 * Math.PI)) * 100, R: Math.hypot(s, c) / (w || 1), n: ns.length };
+  };
+  const wins = [];
+  for (let a = T0; a <= Math.max(T0, T1 - 6) + 1e-9; a += 3) {
+    const w = tune(notes.filter((n) => n.t0 >= a && n.t0 < a + 6));
+    if (w.n < 3 || w.R < 0.3) continue;
+    if (wins.length) w.o += 100 * Math.round((wins[wins.length - 1].o - w.o) / 100);
+    wins.push({ ...w, t: a });
   }
-  const T0 = notes[0].t0, T1 = notes[notes.length - 1].t0, q = (T1 - T0) / 4;
-  const d = median(offs.filter((_, i) => notes[i].t0 >= T1 - q)) - median(offs.filter((_, i) => notes[i].t0 <= T0 + q));
+  if (wins.length < 3 || wins[wins.length - 1].t - wins[0].t < 9) return na(out, L('音与音之间的调不够一致，判断不了整体有没有偏（花腔、滑音多的演唱常见）', 'The notes don’t agree on one tuning well enough to tell a drift (common with lots of ornaments and slides)'), 1, null, true);
+  const k = Math.max(1, Math.floor(wins.length / 4));
+  const d = median(wins.slice(-k).map((w) => w.o)) - median(wins.slice(0, k).map((w) => w.o));
   const a = Math.abs(d), score = Math.round(band(a, [[10, 100], [30, 75], [60, 60], [120, 20]])), status = statusOf(score);
   const dir = d < 0 ? '低' : '高', dirEn = d < 0 ? 'flat' : 'sharp';
   return {
@@ -484,69 +509,9 @@ function keyDrift(notes, cur) {
   };
 }
 
-// 节拍稳定 (see rhythm.js): the meter found in the singing, and how much the
-// local tempo wobbles along the take. Where no meter comes through, the spread
-// of the most common note length (note-by-note timing) is the fallback.
-function beat(R) {
-  const out = { rank: 3, lesson: null, title: L('节拍稳定', 'Steady beat'),
-    how: L('整首歌里本地速度的波动：≤ 1.5% 满分，4% 75 分，7% 60 分（拍子从轻重音和音符变化里找）',
-      'how much the local tempo wobbles through the song: ≤ 1.5% = 100, 4% = 75, 7% = 60 (the beat is found from accents and note changes)') };
-  const M = R.meter;
-  if (R.metered && Number.isFinite(M.wobble)) {
-    const w = M.wobble * 100, score = Math.round(band(w, [[1.5, 100], [4, 75], [7, 60], [12, 20]])), status = statusOf(score);
-    const meter = L(`每分钟约 ${Math.round(M.bpm)} 拍、${M.bar} 拍一小节`, `about ${Math.round(M.bpm)} beats per minute, ${M.bar} beats to the bar`);
-    return {
-      ...out, status, score, wobble: w, bpm: M.bpm,
-      value: L(`速度波动 ${w.toFixed(1)}%`, `tempo wobble ${w.toFixed(1)}%`),
-      detail: status === 'good' ? L(`找到了你的拍子：${meter}；整首歌拍子很稳（本地速度只波动 ${w.toFixed(1)}%）。`, `Found your beat: ${meter}; it stays steady through the song (the local tempo wobbles only ${w.toFixed(1)}%).`)
-        : L(`找到了你的拍子（${meter}），但速度时快时慢（本地速度波动 ${w.toFixed(1)}%，≤ 4% 算稳）。如果是有意的自由处理，可以忽略。`, `Found your beat (${meter}), but the tempo keeps changing (local wobble ${w.toFixed(1)}%; ≤ 4% counts as steady). If it’s deliberate rubato, ignore it.`),
-      action: status === 'good' ? KEEP() : L('跟着节拍器唱（设成你自己的速度），先练最容易赶或拖的那几句。', 'Sing with a metronome set to your own tempo; practise first the lines where you tend to rush or drag.'),
-    };
-  }
-  if (!R.beat) {
-    const n = R.onsets.length, secs = M?.secs ?? 0;
-    if (secs < 15) return na(out, L('唱一段有节拍的歌（15 秒以上）才能判断', 'Sing a song with a beat for 15 s or more'), secs / 15, L(`再唱约 ${Math.ceil(15 - secs)} 秒`, `about ${Math.ceil(15 - secs)} s more`));
-    if (n < 16) return na(out, L('唱一段有节拍的歌（20 个音以上）才能判断', 'Sing a song with a beat (20+ notes)'), n / 16, L(`再唱 ${16 - n} 个音`, `sing ${16 - n} more notes`));
-    return na(out, L('这段演唱里听不出重复的拍子（轻重音和音符变化都没有规律地重复）。可能是自由节奏或练声；如果是有固定节拍的歌，试着把重拍唱得更明显，或者跟着节拍器唱。',
-      'No repeating beat comes through in this take (neither accents nor note changes repeat regularly). It may be free rhythm or an exercise; if the song has a regular beat, try stressing the strong beats more, or sing with a metronome.'), 1, '', true);
-  }
-  const cv = R.beat.cv * 100, score = Math.round(band(cv, [[5, 100], [11, 75], [13.5, 60], [20, 20]])), status = statusOf(score);
-  return {
-    ...out, status, score, cv,
-    value: L(`时长波动 ${cv.toFixed(0)}%`, `length varies ${cv.toFixed(0)}%`),
-    detail: status === 'good' ? L(`同样长的音唱得很匀（最常见的音约 ${R.beat.noteLen.toFixed(2)} 秒，波动 ${cv.toFixed(0)}%）。`, `Equal notes are sung evenly (the most common note ≈ ${R.beat.noteLen.toFixed(2)} s, varying ${cv.toFixed(0)}%).`)
-      : L(`同样长的音唱得时长时短（波动 ${cv.toFixed(0)}%，≤ 11% 算匀）。如果是有意的自由处理（比如在高音前稍作停留），可以忽略。`, `Equal notes come out longer and shorter (varying ${cv.toFixed(0)}%; ≤ 11% counts as even). If it’s deliberate rubato (say, lingering before a high note), ignore it.`),
-    action: status === 'good' ? KEEP() : L('先拍手或用节拍器把这首歌的节奏打出来，再跟着节拍唱；每个音唱满它该有的长度，不赶也不拖。', 'Clap the rhythm or play it with a metronome first, then sing along with the beat; give every note its full length — don’t rush or drag.'),
-  };
-}
-
-// 越唱越快 / 慢 (see rhythm.js): beat length in the first vs the last third.
-function tempo(R) {
-  const out = { rank: 4, lesson: null, title: L('速度稳定', 'Steady tempo'), how: L('后段比前段快 / 慢多少：≤ 3% 满分，8% 75 分，15% 60 分', 'how much faster / slower the end is than the start: ≤ 3% = 100, 8% = 75, 15% = 60') };
-  // prefer the tempo change measured on the meter
-  if (R.metered && Number.isFinite(R.meter.change)) R = { ...R, tempo: { change: R.meter.change, bpm: R.meter.bpm } };
-  if (!R.tempo) {
-    const n = R.onsets.length, secs = R.meter?.secs ?? 0;
-    if (secs < 15) return na(out, L('唱一段有节拍的歌（15 秒以上）才能判断', 'Sing a song with a beat for 15 s or more'), secs / 15, L(`再唱约 ${Math.ceil(15 - secs)} 秒`, `about ${Math.ceil(15 - secs)} s more`));
-    return n < 16 ? na(out, L('唱一段有稳定节拍的歌（20 个音以上）才能判断', 'Sing a song with a steady beat (20+ notes)'), n / 16, L(`再唱 ${16 - n} 个音`, `sing ${16 - n} more notes`))
-      : na(out, R.beat ? L('节拍不够规整，判断不了速度变化', 'The beat isn’t regular enough to judge tempo changes') : L('没有找到稳定的拍子，判断不了速度变化', 'No steady beat found, so tempo changes can’t be judged'), 1, '', true);
-  }
-  // measurement noise on soft, legato singing reaches a few %: lenient bands
-  const c = R.tempo.change * 100, a = Math.abs(c);
-  const score = Math.round(band(a, [[3, 100], [8, 75], [15, 60], [25, 20]])), status = statusOf(score);
-  const dir = c > 0 ? '快' : '慢', dirEn = c > 0 ? 'faster' : 'slower';
-  return {
-    ...out, status, score, change: c, bpm: R.tempo.bpm,
-    value: a < 3 ? L(`速度稳定（约 ${Math.round(R.tempo.bpm)} 拍/分）`, `steady (≈ ${Math.round(R.tempo.bpm)} bpm)`) : L(`后段${dir}了 ${a.toFixed(0)}%`, `${a.toFixed(0)}% ${dirEn} at the end`),
-    detail: status === 'good' ? L(`从头到尾速度基本一致（约每分钟 ${Math.round(R.tempo.bpm)} 拍）。`, `The tempo held from start to end (≈ ${Math.round(R.tempo.bpm)} bpm).`)
-      : L(`越唱越${dir}：后段比前段${dir}了 ${a.toFixed(0)}%。${c > 0 ? '清唱时最常见的就是越唱越快。' : ''}`, `You got ${dirEn}: the end is ${a.toFixed(0)}% ${dirEn} than the start.${c > 0 ? ' Speeding up is the most common slip a cappella.' : ''}`),
-    action: status === 'good' ? KEEP() : c > 0 ? L(`跟着节拍器唱（设成你开头的速度，约每分钟 ${Math.round(R.tempo.bpm)} 拍）；长音和句尾的停顿要唱满、停够，再进下一句。`, `Sing with a metronome set to your opening tempo (≈ ${Math.round(R.tempo.bpm)} bpm); hold long notes and rests at phrase ends for their full length before going on.`)
-      : L(`跟着节拍器唱（约每分钟 ${Math.round(R.tempo.bpm)} 拍）；长音别拖，换气要快。`, `Sing with a metronome (≈ ${Math.round(R.tempo.bpm)} bpm); don’t drag long notes, and breathe quickly.`),
-  };
-}
 
 // 句尾掉音: at the end of a phrase the last long note sinks (the breath runs
-// out and the support drops). Held notes ≥ 0.8 s followed by a pause ≥ 0.25 s:
+// out and the support drops). Held notes ≥ 0.7 s followed by a pause ≥ 0.25 s:
 // mean pitch just before the end (0.22 → 0.05 s before the sound stops — the
 // release itself is shorter) vs the body (until 0.45 s before the end). A drop
 // of ≥ 30 cents counts (a sag that ends ≈ 50 cents low); both windows span
@@ -556,7 +521,7 @@ function tail(notes, F) {
   const out = { rank: 5, lesson: 'sustain', title: L('句尾掉音', 'Sagging phrase ends'), how: L('句尾长音结束前往下掉 ≥ 30 音分的比例：0% 满分，20% 75 分，35% 60 分', 'share of phrase-final long notes that sink ≥ 30 cents before the end: 0% = 100, 20% = 75, 35% = 60') };
   const ends = [];
   for (const n of notes) {
-    if (!n.held || n.dur < 0.8) continue;
+    if (!n.held || n.dur < 0.7) continue;
     // the sound may run on a little past the note (a short fragment that
     // sank too far to count as the same note): follow it to the silence
     let i = lowerBound(F.t, n.t1), end = n.t1;
@@ -570,7 +535,7 @@ function tail(notes, F) {
     if (drop > 150 || body - minPitch(F, end - 0.15, end) > 1) continue; // fall-off
     ends.push({ t: end, drop, name: n.name });
   }
-  if (ends.length < 3) return na(out, L('需要几个句尾的长音（≥ 0.8 秒、后面有停顿）才能判断', 'Needs a few phrase-final long notes (≥ 0.8 s, then a pause)'), ends.length / 3, L(`再唱 ${3 - ends.length} 句（句尾拖一个长音，再停一下）`, `sing ${3 - ends.length} more phrase${3 - ends.length > 1 ? 's' : ''} (end on a long note, then pause)`));
+  if (ends.length < 3) return na(out, L('需要几个句尾的长音（≥ 0.7 秒、后面有停顿）才能判断', 'Needs a few phrase-final long notes (≥ 0.7 s, then a pause)'), ends.length / 3, L(`再唱 ${3 - ends.length} 句（句尾拖一个长音，再停一下）`, `sing ${3 - ends.length} more phrase${3 - ends.length > 1 ? 's' : ''} (end on a long note, then pause)`));
   const sag = ends.filter((e) => e.drop >= 30), share = sag.length / ends.length;
   const status = share <= 0.2 || sag.length <= 1 ? 'good' : share <= 0.35 ? 'ok' : 'poor';
   const avg = sag.length ? sag.reduce((a, e) => a + e.drop, 0) / sag.length : 0;
@@ -625,13 +590,86 @@ function scoop(F) {
   };
 }
 
+// 共鸣: the singer's formant — vocal-tract resonances clustering around
+// 2.5–3.5 kHz that make a voice carry and sound focused, "with a core"
+// (Sundberg 1974). Measured as the singing power ratio (Omori et al. 1996):
+// the strongest harmonic in 0–2 kHz minus the strongest in 2–4 kHz, per sung
+// frame; opera singers 11–30 dB, the best ≈ 15 (Kondo, Kondoh & Fujii 2025). Pressed
+// phonation doesn't lower it; room noise would, so a frame counts only when its
+// 2–4 kHz peak stands ≥ 12 dB above the noise in that band (the band's median
+// level, 10th percentile over the take).
+function ringFrames(F) {
+  if (!F.spr) return null;
+  const med = F.hiMed.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!med.length && F.t.length) return null; // an older take: no spectrum kept
+  const floor = med.length ? med[Math.floor(med.length * 0.1)] : 0, hop = F.t.length > 1 ? (F.t[F.t.length - 1] - F.t[0]) / (F.t.length - 1) : 0.021;
+  const voiced = [], ok = [];
+  for (let i = 0; i < F.t.length; i++) {
+    if (!Number.isFinite(F.spr[i])) continue;
+    voiced.push(i);
+    if (F.hiPk[i] - floor >= 12) ok.push({ spr: F.spr[i], midi: F.midi[i] });
+  }
+  return { ok, voiced: voiced.length, hop };
+}
+// a check that can't be judged with music playing: its heading, marked blocked
+function accompNa(out) {
+  return na({ rank: out.rank, lesson: out.lesson, title: out.title, how: out.how }, L('录音里有伴奏或其他乐器（测到大量远低于你声部的音，像是贝斯），频谱不只是你的声音，判断不了这一项。请清唱，或用不带伴奏的干声。', 'There’s accompaniment or other instruments in the recording (lots of pitches far below your voice type, like a bass line), so the spectrum isn’t your voice alone and this can’t be judged. Sing a cappella, or use a dry vocal without backing.'), 1, '', true);
+}
+const RING_SECS = 3;
+function ringNa(out, R) {
+  const secs = R ? R.ok.length * R.hop : 0, all = R ? R.voiced * R.hop : 0;
+  if (!R) return na(out, L('这条记录没有保存频谱数据（旧版本、也没有录音），判断不了共鸣', 'This take has no spectral data (older version without a recording), so resonance can’t be judged'), 1, '', true);
+  if (all >= RING_SECS * 2 && secs < 0.5 * all) return na(out, L('录音底噪太高：2–4 kHz 一带的歌声和噪声分不开，判断不了共鸣。换安静的地方、离麦克风近一点再录。', 'Too much background noise: in the 2–4 kHz band the voice can’t be told from the noise. Record somewhere quieter, closer to the microphone.'), 1, '', true);
+  return na(out, L(`唱 ${RING_SECS} 秒以上才能判断`, `Needs ${RING_SECS} s or more of singing`), Math.min(1, secs / RING_SECS), L(`再唱约 ${Math.max(1, Math.ceil(RING_SECS - secs))} 秒`, `about ${Math.max(1, Math.ceil(RING_SECS - secs))} s more`));
+}
+function ring(F) {
+  const out = { rank: 6, lesson: null, title: L('穿透力', 'Ring'), how: L('歌唱功率比：0–2 kHz 最强谐波比 2–4 kHz 最强谐波高多少，越小声音越亮、越传得远：≤ 15 dB 满分，21 dB 75 分，26 dB 60 分（歌剧演员 11–30 dB）', 'singing power ratio: how much stronger the top harmonic in 0–2 kHz is than in 2–4 kHz — smaller rings more: ≤ 15 dB = 100, 21 dB = 75, 26 dB = 60 (opera singers 11–30 dB)') + ' ' + ref('sundberg1974', 'omori1996', 'kondo2025') };
+  const R = ringFrames(F);
+  if (!R || R.ok.length * R.hop < RING_SECS || (R.voiced * R.hop >= RING_SECS * 2 && R.ok.length < 0.5 * R.voiced)) return ringNa(out, R);
+  const spr = median(R.ok.map((f) => f.spr));
+  const score = Math.round(band(spr, [[15, 100], [21, 75], [26, 60], [34, 20]])), status = statusOf(score);
+  return {
+    ...out, status, score, spr,
+    value: L(`高频比低频弱 ${spr.toFixed(0)} dB`, `2–4 kHz ${spr.toFixed(0)} dB below 0–2 kHz`),
+    detail: status === 'good' ? L(`2–4 kHz 一带（歌手共振峰）能量足，声音亮、传得远（${spr.toFixed(0)} dB，歌剧演员 11–30 dB）。`, `Plenty of energy around 2–4 kHz (the singer’s formant): the voice has a core and carries (${spr.toFixed(0)} dB; opera singers 11–30 dB).`)
+      : L(`2–4 kHz 一带能量偏弱（${spr.toFixed(0)} dB），声音会显得闷、散，传不远。`, `Little energy around 2–4 kHz (${spr.toFixed(0)} dB): the voice can sound dull and spread, and won’t carry.`),
+    action: status === 'good' ? KEEP() : L('先用“ng”或闭嘴哼鸣，找到鼻梁、面部前面的振动感，再慢慢张开成“啊”，保持那个位置；口腔后部像打哈欠开头那样打开，喉咙别压。', 'Hum on “ng” or with closed lips until you feel buzzing at the front of the face, then open slowly into “ah” keeping that place; open the back of the mouth as at the start of a yawn, without pressing the throat.'),
+  };
+}
+// Does the ring hold up high? The top third of the sung range vs the middle
+// third (same frames as above); losing it up high = thin or shouted top notes.
+function ringHigh(F) {
+  const out = { rank: 7, lesson: 'noshout', title: L('高音共鸣', 'Ring up high'), how: L('音域上三分之一比中间三分之一的穿透力差多少：≤ 3 dB 满分，6 dB 75 分，9 dB 60 分', 'how much ring the top third of your range loses against the middle third: ≤ 3 dB = 100, 6 dB = 75, 9 dB = 60') + ' ' + ref('omori1996') };
+  const R = ringFrames(F);
+  if (!R || R.ok.length * R.hop < RING_SECS || (R.voiced * R.hop >= RING_SECS * 2 && R.ok.length < 0.5 * R.voiced)) return ringNa(out, R);
+  const ms = R.ok.map((f) => f.midi).sort((a, b) => a - b), q = (p) => ms[Math.floor(p * (ms.length - 1))];
+  const lo = q(0.33), hi = q(0.67);
+  const top = R.ok.filter((f) => f.midi >= hi), mid = R.ok.filter((f) => f.midi > lo && f.midi < hi);
+  if (q(0.9) - q(0.1) < 5 || top.length * R.hop < 1 || mid.length * R.hop < 1) return na(out, L('要唱出 5 个半音以上的高低起伏才能判断', 'Needs singing over 5 semitones or more'), Math.min(1, (q(0.9) - q(0.1)) / 5), L('唱一段有高有低的旋律', 'sing a melody that goes up and down'));
+  const loss = median(top.map((f) => f.spr)) - median(mid.map((f) => f.spr));
+  const score = Math.round(band(Math.max(0, loss), [[3, 100], [6, 75], [9, 60], [14, 20]])), status = statusOf(score);
+  return {
+    ...out, status, score, loss,
+    value: loss <= 1 ? L('高音共鸣保持得住', 'holds up high') : L(`高音区少 ${loss.toFixed(0)} dB`, `${loss.toFixed(0)} dB less up high`),
+    detail: status === 'good' ? L('往高唱时穿透力还在，高音不发虚、不变薄。', 'The core stays as you go up: high notes don’t turn thin or airy.')
+      : L(`音域上部的穿透力比中间弱 ${loss.toFixed(0)} dB：高音变薄、发虚，或者在喊。`, `The top of your range has ${loss.toFixed(0)} dB less ring than the middle: high notes turn thin or airy, or get shouted.`),
+    action: status === 'good' ? KEEP() : L('往高唱时别加音量去够，保持哼鸣时的面部振动位置，嘴型往竖、往窄收。去练「不喊唱」。', 'Don’t reach for high notes with volume: keep the buzzing place from humming and narrow the mouth vertically. Practise “No shouting”.'),
+  };
+}
+
 // 强弱对比: loudness contrast between phrases, beyond the natural rise of
 // ≈ 0.6 dB per semitone with pitch (so a louder, higher chorus still counts).
 // Phrases = notes separated by pauses ≥ 0.25 s; P85 − P15 of the phrase levels.
 // What the contrast should express is up to the singer — only whether there is any.
+// 强弱对比: loudness from phrase to phrase. The level is the voice's own
+// (its harmonics, room noise subtracted — see voiceDb), so noise doesn't flatten
+// the soft phrases; older takes without it use the frame level. A short excerpt
+// (one verse) may rightly be even: low contrast is only called out after 40 s
+// of singing, high contrast counts at once.
+const DYN_SECS = 40;
 function dynamics(notes, voicedTime) {
-  const out = { rank: 10, lesson: 'dynamics', title: L('强弱对比', 'Dynamic contrast'), how: L('乐句之间的音量差：≥ 10 dB 满分，6 dB 75 分，3 dB 60 分', 'loudness difference between phrases: ≥ 10 dB = 100, 6 dB = 75, 3 dB = 60') };
-  const ns = notes.filter((n) => n.dur >= 0.25);
+  const out = { rank: 10, lesson: 'dynamics', title: L('强弱对比', 'Dynamic contrast'), how: L('乐句之间歌声本身的音量差（噪声已扣除）：≥ 10 dB 满分，6 dB 75 分，3 dB 60 分；差得少时要唱满 40 秒才下结论', 'loudness difference between phrases, the voice alone (noise removed): ≥ 10 dB = 100, 6 dB = 75, 3 dB = 60; a small difference is only judged after 40 s') };
+  const ns = notes.filter((n) => n.dur >= 0.25).map((n) => ({ ...n, lv: Number.isFinite(n.vdb) ? n.vdb : n.db }));
   const phrases = [];
   let cur = [];
   for (const n of ns) { if (cur.length && n.t0 - cur[cur.length - 1].t1 > 0.25) { phrases.push(cur); cur = []; } cur.push(n); }
@@ -641,10 +679,13 @@ function dynamics(notes, voicedTime) {
     return na(out, L('唱 20 秒以上、至少 4 句才能判断', 'Needs 20 s or more and at least 4 phrases'), Math.min(ok.length / 4, voicedTime / 20), voicedTime < 20 ? L(`再唱约 ${Math.ceil(20 - voicedTime)} 秒`, `about ${Math.ceil(20 - voicedTime)} s more`) : L(`再唱 ${4 - ok.length} 句`, `sing ${4 - ok.length} more phrase${4 - ok.length > 1 ? 's' : ''}`));
   }
   const mid = ns.reduce((a, n) => a + n.midi, 0) / ns.length;
-  const lv = ok.map((p) => { const w = p.reduce((a, n) => a + n.dur, 0); return p.reduce((a, n) => a + n.dur * (n.db - 0.6 * (n.midi - mid)), 0) / w; }).sort((a, b) => a - b);
+  const lv = ok.map((p) => { const w = p.reduce((a, n) => a + n.dur, 0); return p.reduce((a, n) => a + n.dur * (n.lv - 0.6 * (n.midi - mid)), 0) / w; }).sort((a, b) => a - b);
   const pct = (q) => { const x = q * (lv.length - 1), i = Math.floor(x); return lv[i] + (lv[Math.min(i + 1, lv.length - 1)] - lv[i]) * (x - i); };
   const c = pct(0.85) - pct(0.15);
   const score = Math.round(band(c, [[1.5, 20], [3, 60], [6, 75], [10, 100]])), status = statusOf(score);
+  if (status !== 'good' && voicedTime < DYN_SECS) {
+    return na(out, L(`目前这 ${ok.length} 句音量差不多（${c.toFixed(1)} dB）。一小段里句与句差不多很正常，强弱安排要看主歌到副歌——唱满 ${DYN_SECS} 秒再判断。`, `So far these ${ok.length} phrases are about equally loud (${c.toFixed(1)} dB). Within one short passage that’s normal; the loud–soft plan shows from verse to chorus — judged after ${DYN_SECS} s.`), voicedTime / DYN_SECS, L(`再唱约 ${Math.ceil(DYN_SECS - voicedTime)} 秒`, `about ${Math.ceil(DYN_SECS - voicedTime)} s more`));
+  }
   return {
     ...out, status, score, contrast: c,
     value: L(`乐句音量差 ${c.toFixed(0)} dB`, `${c.toFixed(0)} dB between phrases`),

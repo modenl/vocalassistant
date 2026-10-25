@@ -79,13 +79,16 @@ export class AudioEngine {
   frameTime() { return this.now() - this.N / (2 * this.sampleRate); }
 
   async startMic({ deviceId, record = true } = {}) {
-    await this.ensureCtx();
+    // the microphone first, then the audio output: opening a Bluetooth
+    // headset's microphone switches it to its call profile, which can cut sound
+    // that was already playing; output opened after the switch keeps working
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         deviceId: deviceId ? { exact: deviceId } : undefined,
         echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1,
       },
     });
+    await this.ensureCtx();
     this.source = this.ctx.createMediaStreamSource(this.stream);
     this.offset = 0;
     this.mode = 'mic';
@@ -141,6 +144,12 @@ export class AudioEngine {
     this.stream = null; this.recorder = null; this.source = null; this.node = null; this.sink = null; this.analyser = null;
     this.mode = null;
     return blob;
+  }
+
+  // the microphone in use is a Bluetooth headset's (AirPods and the like)
+  get micIsHeadset() {
+    const label = this.stream?.getAudioTracks()[0]?.label || '';
+    return /airpods|bluetooth|headset|hands-?free|buds|beats|耳机/i.test(label);
   }
 
   static async listInputs() {

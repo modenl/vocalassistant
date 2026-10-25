@@ -49,7 +49,7 @@ export function dimsHtml(S, { actions = true, rules = true } = {}) {
     <div class="panel radar-box">
       <div class="total"><span>${L('总分', 'Total')}</span><b style="color:${scoreColor(S.total)}">${S.total ?? '—'}</b></div>
       ${radarSvg(S)}
-      <p class="muted" style="font-size:11.5px;margin:0">${L('每一维都不需要原唱或乐谱，按你自己的调和拍子判断。线在 60 以内 = 需要练，75 以外 = 好。', 'No original recording or score needed — judged against your own key and beat. Inside the 60 ring = practise, beyond 75 = good.')}</p>
+      <p class="muted" style="font-size:11.5px;margin:0">${L('每一维都不需要原唱或乐谱，按你自己的调判断。线在 60 以内 = 需要练，75 以外 = 好。', 'No original recording or score needed — judged against your own key. Inside the 60 ring = practise, beyond 75 = good.')}</p>
     </div>
     <div class="dcards">${DIMS.map((d) => {
       const D = S.dims?.[d.key] || { score: null, status: 'na' };
@@ -104,10 +104,13 @@ export function progressHtml(S) {
 
 export function reportHtml(S) {
   const top = S.issues;
+  // music besides the voice: say so first — some checks were left out because of it
+  const acc = S.accomp?.detected ? `<p class="ls-hint off" style="font-size:14.5px">${L(`🎵 检测到伴奏或其他乐器：${Math.round(S.accomp.share * 100)}% 的音高远低于你的声部（像是贝斯），这些不算你唱的。共鸣、强弱对比不评分，音准等也可能受影响。要准确评分，请清唱，或用不带伴奏的干声。`, `🎵 Accompaniment or other instruments detected: ${Math.round(S.accomp.share * 100)}% of the pitches lie far below your voice type (like a bass line) and aren’t counted as you. Resonance and dynamics aren’t scored, and pitch may be affected too. For an accurate score, sing a cappella or use a dry vocal.`)}</p>` : '';
+  if (acc) return acc + (top.length ? reportHtml({ ...S, accomp: null }) : '');
   if (!top.length) {
     const na = DIMS.filter((d) => S.dims?.[d.key]?.score == null).length;
     return na >= 3
-      ? `<p class="t2">${L('唱的内容还不够判断大部分项目：试着唱一段有长音、有高低起伏、有节拍的歌（30 秒以上）。', 'Not enough to judge most items: try a song with long notes, highs and lows and a beat (30 s or more).')}</p>`
+      ? `<p class="t2">${L('唱的内容还不够判断大部分项目：试着唱一段有长音、有高低起伏的歌（30 秒以上）。', 'Not enough to judge most items: try a song with long notes and highs and lows (30 s or more).')}</p>`
       : `<p style="font-size:15px">${L('🎉 这次没有发现明显问题。继续保持，也可以去「基础课程」巩固。', '🎉 No clear problems this time. Keep it up — or consolidate in “Lessons”.')}</p>`;
   }
   return `<ol class="report">${top.map((r) => `<li><b>${r.title}</b>${L('：', ': ')}${r.detail}<br><span class="t2">${L('怎么办：', 'What to do: ')}${r.action}</span>
@@ -191,7 +194,7 @@ export class LiveView {
     $('btnStart').textContent = L('■ 结束，看结果', '■ Stop & see results');
     $('btnStart').classList.add('recording');
     $('btnFile').disabled = true;
-    $('status').textContent = kind === 'mic' ? L('正在听… 唱一首歌 30 秒以上（有长音、有高有低、有节拍）就能出完整的五维评分。', 'Listening… sing a song for 30 s or more (long notes, highs and lows, a beat) for a full five-dimension score.') : L(`正在分析：${name}`, `Analysing: ${name}`);
+    $('status').textContent = kind === 'mic' ? L('正在听… 唱一首歌 30 秒以上（有长音、有高有低）就能出完整的五维评分；环境安静一点，共鸣才能测得准。', 'Listening… sing a song for 30 s or more (long notes, highs and lows) for a full five-dimension score; a quiet room lets resonance be measured.') : L(`正在分析：${name}`, `Analysing: ${name}`);
     $('status').classList.remove('warn');
     this.busy = false;
     this.raf = requestAnimationFrame(() => this.tick());
@@ -268,9 +271,9 @@ export class LiveView {
     const why = report ? '' : L('离开页面时已自动结束，', 'Stopped when you left the page; ');
     const F = this.metrics.frames;
     const rec = {
-      version: 2, id: `s${Date.now()}`, createdAt: Date.now(), name: this.name, source, duration,
+      version: 2, pitchV: 5, id: `s${Date.now()}`, createdAt: Date.now(), name: this.name, source, duration,
       voiceType: this.app.settings.voiceType,
-      frames: { t: Float32Array.from(F.t), midi: Float32Array.from(F.midi), db: Float32Array.from(F.db) },
+      frames: { t: Float32Array.from(F.t), midi: Float32Array.from(F.midi), db: Float32Array.from(F.db), spr: Float32Array.from(F.spr), hiPk: Float32Array.from(F.hiPk), hiMed: Float32Array.from(F.hiMed), vdb: Float32Array.from(F.vdb), out: Uint8Array.from(F.out) },
       notes: this.metrics.notes.map(({ t0, t1, target, cents, db, steady }) => ({ t0, t1, target, cents, db, steady })),
       breaks: this.metrics.breaks.map((b) => ({ t: b.t, from: b.from, to: b.to })),
       summary: stripPoints(S),
@@ -313,7 +316,7 @@ export class LiveView {
         ${progressHtml(S)}
         ${S.issues.length ? `<h3 style="font-size:15px;margin:14px 0 4px">${L('已经能看出的问题', 'Problems already visible')}</h3>` : ''}` : `<h3 style="font-size:17px;margin-bottom:4px">${L('这次最需要练的', 'What to practise most')}</h3>`}
       <p class="muted" style="margin:0 0 10px;font-size:12.5px">${L('时长', 'Length')} ${fmtT(rec.duration)} · ${L('唱了', 'sung')} ${fmtT(S.voicedTime)}${S.range ? ` · ${L('音域', 'range')} ${S.range.loName}–${S.range.hiName}` : ''}</p>
-      ${partial && !S.issues.length ? '' : reportHtml(S)}
+      ${partial && !S.issues.length && !S.accomp?.detected ? '' : reportHtml(S)}
       ${partial ? '' : `<div class="report-dims">${radarSvg(S)}<div class="t2" style="font-size:13px">${L('总分', 'Total')} <b style="font-size:22px;color:${scoreColor(S.total)}">${S.total}</b><br>${DIMS.map((d) => `${d.title} ${S.dims[d.key].score ?? '—'}`).join(' · ')}</div></div>`}
       <details style="margin-top:6px"><summary class="t2" style="cursor:pointer">${L('五维评分详情', 'Five-dimension details')}</summary>${dimsHtml(S, { actions: false })}</details>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap">

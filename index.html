@@ -16,6 +16,8 @@
       <button data-tab="live" class="active" data-en="Sing &amp; check">唱一段看问题</button>
       <button data-tab="lessons" data-en="Lessons">基础课程</button>
       <button data-tab="gym" data-en="Pitch trainer">音准训练</button>
+      <button data-tab="scope" data-en="Voice scope">声音显微镜</button>
+      <button data-tab="along" data-en="Sing along">跟原唱唱</button>
       <button data-tab="history" data-en="History">历史记录</button>
       <button data-tab="settings" data-en="Settings">设置</button>
     </nav>
@@ -62,7 +64,7 @@
         </div>
       </div>
 
-      <div class="ph" style="margin-top:14px"><h3 data-en="Five-dimension score">五维评分</h3><span class="sub" data-en="Pitch · Rhythm · Breath · Technique · Expression — updated as you sing, no original recording or score needed; every item tells you what to do next">音准 · 节奏 · 气息 · 技巧 · 表现力 —— 边唱边更新，不需要原唱或乐谱；每一项都告诉你下一步做什么</span></div>
+      <div class="ph" style="margin-top:14px"><h3 data-en="Five-dimension score">五维评分</h3><span class="sub" data-en="Pitch · Resonance · Breath · Technique · Expression — updated as you sing, no original recording or score needed; every item tells you what to do next">音准 · 共鸣 · 气息 · 技巧 · 表现力 —— 边唱边更新，不需要原唱或乐谱；每一项都告诉你下一步做什么</span></div>
       <div id="mcards"></div>
     </section>
 
@@ -72,13 +74,17 @@
     <!-- ================= PITCH TRAINER ================= -->
     <section class="tab" id="tab-gym"></section>
 
+    <!-- ================= VOICE SCOPE ================= -->
+    <section class="tab" id="tab-scope"></section>
+    <section class="tab" id="tab-along"></section>
+
     <!-- ================= HISTORY ================= -->
     <section class="tab" id="tab-history"></section>
 
     <!-- ================= SETTINGS ================= -->
     <section class="tab" id="tab-settings"></section>
 
-    <p class="disclaimer" data-en="Note: judgements use only the pitch, loudness and note timing picked up by the microphone — the parts that can be measured reliably; a cappella works best (an accompaniment interferes). Without a score, a wrong note or a whole beat too long that is still sung steadily can’t be detected. Timbre, vocal registers (chest / head / mix) and emotional expression are for your teacher’s and listeners’ ears. If hoarseness or pain persists, see a doctor.">说明：只根据麦克风里的音高、音量和音头的时间做判断，这是能测得准的部分；清唱效果最好（伴奏声会干扰判断）。没有乐谱，所以唱错了音或整拍唱错、但唱得很稳，是测不出来的。音色、发声机制（胸声 / 头声 / 混声）、感情表达请以老师和听众的耳朵为准。如有持续声音嘶哑、疼痛，请就医。</p>
+    <p class="disclaimer" data-en="Note: judgements use only the pitch, loudness and the 2–4 kHz part of the spectrum picked up by the microphone — the parts that can be measured reliably; a cappella in a quiet room works best (an accompaniment or room noise interferes). Without a score, a wrong note that is still sung steadily can’t be detected, and timing isn’t judged. Resonance is measured only as its acoustic result (the singer’s formant), not where you feel it; vocal registers (chest / head / mix) and emotional expression are for your teacher’s and listeners’ ears. If hoarseness or pain persists, see a doctor.">说明：只根据麦克风里的音高、音量和 2–4 kHz 一段频谱做判断，这是能测得准的部分；在安静的地方清唱效果最好（伴奏和环境噪声会干扰判断）。没有乐谱，所以唱错了音但唱得很稳是测不出来的，节奏也不做判断。共鸣只测它在声音上的结果（歌手共振峰），不判断你在哪里感觉到共鸣；发声机制（胸声 / 头声 / 混声）、感情表达请以老师和听众的耳朵为准。如有持续声音嘶哑、疼痛，请就医。</p>
   </main>
   <div id="tooltip" class="tooltip"></div>
   <script type="module" src="js/main.js"></script>

@@ -14,6 +14,7 @@ import {
   newState, restore, tolOf, habitOf, feedbackOf, degreeName, devText, taskText, resultText, findingText,
 } from '../gym/drills.js';
 import { L as tr } from '../i18n.js';
+import { pitchNowHtml } from './pitchNow.js';
 
 const KEY = 'vocalassistant.gym.v1';
 const THINK = 1.0; // s of silence after the reference: hear it in your head first
@@ -73,7 +74,7 @@ export class GymView {
           </div>
         </div>
         <div class="panel">
-          <div class="ph"><h3>${tr('音高线', 'Pitch line')}</h3><span class="sub">${tr('绿带 = 要唱的音，带子宽度就是现在的判定线；灰带 = 只听不唱的 do', 'Green band = the note to sing, as wide as the current pass line; grey band = do (heard, not sung)')}</span></div>
+          <div class="ph"><h3>${tr('音高线', 'Pitch line')}</h3><div class="ph-right" id="gPitch">${pitchNowHtml(0)}</div><span class="sub">${tr('绿带 = 要唱的音，带子宽度就是现在的判定线；灰带 = 只听不唱的 do', 'Green band = the note to sing, as wide as the current pass line; grey band = do (heard, not sung)')}</span></div>
           <div class="gym-trace"><canvas class="viz" id="gTrace" style="height:260px"></canvas>
             <div class="gym-blind" id="gBlind" hidden>${tr('唱完再显示音高线<br><span class="muted">这一阶段练的是：不看屏幕也能唱准</span>', 'The pitch line appears after you sing<br><span class="muted">This stage trains singing in tune without watching the screen</span>')}</div></div>
           <div class="gym-level"><span class="muted">${tr('麦克风', 'Mic')}</span><div class="level"><div id="gLevel"></div></div></div>
@@ -431,6 +432,9 @@ export class GymView {
       this.draw();
       const lv = this.root.querySelector('#gLevel');
       if (lv) lv.style.width = `${Math.max(0, Math.min(100, ((this.db ?? -100) + 60) * 2))}%`;
+      const pn = this.root.querySelector('#gPitch'), lf = this.frames[this.frames.length - 1];
+      // in "after singing" mode the pitch stays hidden while singing, like the line
+      if (pn) pn.innerHTML = pitchNowHtml(lf?.voiced && !(this.fb === 'blind' && this.phase === 'sing') ? lf.f0 : 0, this.app.settings.a4);
       if (this.phase === 'think' || this.phase === 'sing') this.liveHint();
       this.raf = requestAnimationFrame(tick);
     };

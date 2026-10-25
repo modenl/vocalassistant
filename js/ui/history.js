@@ -6,10 +6,34 @@ import { VOICE_TYPES } from '../config.js';
 import { PitchTrack, fmtT } from '../viz/pitchTrack.js';
 import { dimsHtml, reportHtml, progressHtml, stripPoints, marksOf, scoreColor } from './live.js';
 import { L, locale } from '../i18n.js';
+import { FrameAnalyzer } from '../dsp/analyzer.js';
+import { PitchTracker } from '../analysis/pitch.js';
 
 // default take names were saved in the language of the day
 const NAMES = { '麦克风演唱': 'Microphone take', '导入的录音': 'Imported recording' };
 const nameOf = (r) => { const n = r.name || ''; return L(Object.entries(NAMES).find(([, en]) => en === n)?.[0] || n, NAMES[n] || n); };
+
+// Takes recorded before the pitch tracker followed harmonics through room
+// noise (pitchV 2) lost much of the voice, and before pitchV 3 no spectrum was
+// kept for resonance, before pitchV 4 no voice-only level, before pitchV 5 no
+// mark for pitches far below the voice type (accompaniment): with the recording
+// kept, the track is rebuilt from the audio, on the analysis clock (audio + offset).
+const PITCH_V = 5;
+async function retrack(rec, blob, settings) {
+  const buf = await new OfflineAudioContext(1, 1, 48000).decodeAudioData(await blob.arrayBuffer());
+  // older takes didn't store where the recording starts on the analysis clock
+  if (rec.audioOffset == null && rec.source !== 'file') { const d = rec.duration - buf.duration; rec.audioOffset = d > 0.05 && d < 5 ? d : 0; }
+  const x = buf.getChannelData(0), sr = buf.sampleRate, off = rec.audioOffset ?? 0;
+  const an = new FrameAnalyzer(sr), pt = new PitchTracker(settings), t = [], midi = [], db = [], spr = [], hiPk = [], hiMed = [], vdb = [], out = [];
+  for (let end = an.N; end <= x.length; end += 1024) {
+    const tt = (end - an.N / 2) / sr, st = pt.update(an.analyze(x.subarray(end - an.N, end), { gateDb: settings.gateDb, pitchOnly: true }), tt);
+    t.push(tt + off); midi.push(st.voiced ? st.midi : NaN); db.push(st.db);
+    spr.push(st.voiced ? st.spr : NaN); hiPk.push(st.voiced ? st.hiPk : NaN); hiMed.push(st.hiMed); vdb.push(st.voiced ? st.vdb : NaN); out.push(st.outside ? 1 : 0);
+    if (t.length % 500 === 0) await new Promise((ok) => setTimeout(ok, 0)); // keep the page responsive
+  }
+  rec.frames = { t, midi, db, spr, hiPk, hiMed, vdb, out };
+  rec.pitchV = PITCH_V;
+}
 
 // Re-run the current measures on a record's stored pitch/level track, so older
 // records follow the current rules (five dimensions, fewer false breaks).
@@ -18,7 +42,7 @@ function reanalyze(rec) {
   const m = new SingingMetrics(), F = rec.frames;
   for (let i = 0; i < F.t.length; i++) {
     const midi = F.midi[i], voiced = Number.isFinite(midi);
-    m.push({ t: F.t[i], voiced, midi: voiced ? midi : NaN, raw: voiced ? midi : NaN, db: F.db[i] });
+    m.push({ t: F.t[i], voiced, midi: voiced ? midi : NaN, raw: voiced ? midi : NaN, db: F.db[i], spr: F.spr?.[i], hiPk: F.hiPk?.[i], hiMed: F.hiMed?.[i], vdb: F.vdb?.[i], outside: !!F.out?.[i] });
   }
   const full = m.finish(), S = stripPoints(full);
   const breaks = m.breaks.map((b) => ({ t: b.t, from: b.from, to: b.to }));
@@ -30,7 +54,7 @@ function reanalyze(rec) {
 }
 
 // total score + one dot per dimension
-const dotsHtml = (S) => (S.dims
+const dotsHtml = (S) => (S.dims?.resonance
   ? `<b class="mono" style="color:${scoreColor(S.total)}">${S.total ?? '—'}</b>${DIMS.map((d) => { const D = S.dims[d.key]; return `<span title="${d.title}${L('：', ': ')}${D.score ?? L('数据不足', 'not enough data')}" style="background:${STATUS[D.status].color}"></span>`; }).join('')}`
   : `<span class="muted" style="font-size:11px">${L('更新中…', 'updating…')}</span>`);
 
@@ -54,11 +78,13 @@ export class HistoryView {
     const recs = all.filter((r) => r.version === 2);
     const old = all.length - recs.length;
     if (!recs.length) {
+      this.app.route(['history']);
       this.root.innerHTML = `<div class="empty" style="padding:40px">${L('还没有记录。在“唱一段看问题”里唱完一段，就会保存在这里。', 'No takes yet. Sing something on “Sing & check” and it will be saved here.')}</div>${old ? this.oldHtml(old) : ''}`;
       this.bindOld(all);
       return;
     }
     const cur = recs.find((r) => r.id === id) || recs[0];
+    this.app.route(['history', cur.id], { replace: !id });
     this.root.innerHTML = `<div class="hist-layout">
       <div class="panel"><div class="ph"><h3>${L('记录', 'Takes')}</h3><span class="sub">${recs.length}</span></div>
         <div class="sess-list">${recs.map((r) => `<div class="sess-item ${r.id === cur.id ? 'active' : ''}" data-id="${r.id}">
@@ -70,7 +96,7 @@ export class HistoryView {
     this.root.querySelectorAll('.sess-item').forEach((el) => { el.onclick = () => this.show(el.dataset.id); });
     this.bindOld(all);
     await this.detail(await getSession(cur.id));
-    this.upgrade(recs.filter((r) => !r.summary.dims && r.id !== cur.id));
+    this.upgrade(recs.filter((r) => !r.summary.dims?.resonance && r.id !== cur.id));
   }
 
   // records saved before the five dimensions: re-analysed one by one in the background
@@ -101,8 +127,15 @@ export class HistoryView {
   async detail(rec) {
     this.stop();
     const el = this.root.querySelector('#histDetail');
+    const blob = rec.hasAudio ? await getAudio(rec.id) : null;
+    const retracked = blob && (rec.pitchV || 1) < PITCH_V;
+    if (retracked) {
+      el.innerHTML = `<div class="panel empty">${L('正在用新的音高识别重新分析这段录音…', 'Re-analysing this recording with the new pitch tracking…')}</div>`;
+      try { await retrack(rec, blob, this.app.settings); } catch { rec.pitchV = PITCH_V; /* undecodable: keep the stored track */ }
+      if (!el.isConnected) return;
+    }
     const { changed, full } = reanalyze(rec);
-    if (changed) saveSession(rec).catch(() => {});
+    if (changed || retracked) saveSession(rec).catch(() => {});
     const item = this.root.querySelector(`.sess-item[data-id="${rec.id}"] .dots`);
     if (item) item.innerHTML = dotsHtml(rec.summary);
     const S = rec.summary;
@@ -135,13 +168,13 @@ export class HistoryView {
     draw();
     el.querySelector('#dlRec').style.display = rec.hasAudio ? '' : 'none';
     if (rec.hasAudio) {
-      const blob = await getAudio(rec.id);
       const dl = el.querySelector('#dlRec');
       if (blob) {
         dl.onclick = () => {
           const a = document.createElement('a');
           a.href = URL.createObjectURL(blob);
-          a.download = `vocallab-${new Date(rec.createdAt).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.${/mp4/.test(blob.type) ? 'm4a' : /wav/.test(blob.type) ? 'wav' : /ogg/.test(blob.type) ? 'ogg' : 'webm'}`;
+          const d = new Date(rec.createdAt), p2 = (n) => String(n).padStart(2, '0'); // local time, as shown in the list
+          a.download = `vocallab-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}-${p2(d.getHours())}-${p2(d.getMinutes())}.${/mp4/.test(blob.type) ? 'm4a' : /wav/.test(blob.type) ? 'wav' : /ogg/.test(blob.type) ? 'ogg' : 'webm'}`;
           a.click();
           setTimeout(() => URL.revokeObjectURL(a.href), 5000);
         };

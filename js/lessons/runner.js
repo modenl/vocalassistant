@@ -6,6 +6,7 @@ import { PitchTracker } from '../analysis/pitch.js';
 import { SingingMetrics } from '../analysis/metrics.js';
 import { refSounding } from '../audio/tone.js';
 import { L } from '../i18n.js';
+import { pool, SpecAvg } from '../viz/scope.js';
 
 const MAX_SECONDS = 40;
 
@@ -27,13 +28,15 @@ export class Take {
 }
 
 export class StepRunner {
-  constructor(app, step, P, { onEnd } = {}) {
+  // ctx: what earlier steps saved (e.g. the plain-voice reference for twang)
+  constructor(app, step, P, { onEnd, ctx } = {}) {
     this.app = app;
     this.step = step;
     this.P = P;
-    this.check = step.check(P);
+    this.check = step.check(P, ctx);
     this.onEnd = onEnd;
     this.take = new Take(app.settings);
+    this.spec = new SpecAvg(0.4);
     this.ev = { progress: 0, pass: false, level: 'idle', hint: '' };
     this.last = null;
     this.endAt = null; // passed, or the step said the attempt is over (ev.final)
@@ -47,10 +50,15 @@ export class StepRunner {
     this.eng.onFrame = (frame, t) => {
       if (!an || t < 0) return;
       const muted = refSounding();
-      const st = this.take.push(an.analyze(frame, { gateDb: S.gateDb, pitchOnly: true }), t, muted);
+      // steps that judge the vocal folds' closure need the full analysis (H1*−H2*, CPP)
+      const feat = an.analyze(frame, { gateDb: S.gateDb, pitchOnly: !this.step.glottal, formants: 'compare' in this.step });
+      const st = this.take.push(feat, t, muted);
+      // the voice's recent spectrum (for the spectrum views and the saved references)
+      if (!muted && st.voiced) this.spec.push(pool(feat.spec, feat.binHz), this.last ? Math.min(0.1, t - this.last.t) : 0.02);
       this.last = st;
       if (muted) this.ev = { ...this.ev, pass: false, level: 'idle', hint: L('正在播放参考音——听完再唱（这段时间不计入）', 'Playing the reference — listen, then sing (this time doesn’t count)') };
       else if (t - this.lastEval >= 0.15) { this.lastEval = t; this.ev = this.check(this.take); }
+      if (this.ev.pass && !this.passEv) this.passEv = this.ev;
       if ((this.ev.pass || this.ev.final) && this.endAt == null) this.endAt = t;
       if ((this.endAt != null && t - this.endAt > 1.0) || t > (this.step.maxSeconds || MAX_SECONDS)) this.stop();
     };
@@ -65,7 +73,8 @@ export class StepRunner {
     this.running = false;
     this.take.ended = true;
     this.take.m.finish();
-    this.ev = this.check(this.take);
+    // a pass is kept: the second after it (stopping, a breath) can't undo it
+    this.ev = this.passEv || this.check(this.take);
     await this.eng.stop();
     this.onEnd?.(this);
   }

@@ -18,6 +18,7 @@ ok('English chosen', getLang() === 'en');
 const { synth, hz, VOWELS } = await import('../tools/synth.mjs');
 const { runPipeline } = await import('../tools/analyze-file.mjs');
 const { LESSONS } = await import('../js/lessons/lessons.js');
+const { LEVELS } = await import('../js/analysis/twang.js');
 const { DIMS, STATUS } = await import('../js/analysis/metrics.js');
 const V = { oq: 0.5, sq: 2.5, vowel: VOWELS.a, jitter: 0.002, shimmer: 0.02 };
 const segs = [50, 53, 57, 55, 52, 50, 55, 59, 57, 53].flatMap((m) => [{ dur: 1.1, f0: () => hz(m), ...V }, { dur: 0.3 }]);
@@ -26,7 +27,7 @@ const han = /[一-鿿]/;
 const texts = [
   ...DIMS.flatMap((d) => [d.title, d.sub, ...d.checks.flatMap(([k]) => [S[k].title, S[k].value, S[k].detail, S[k].action, S[k].how, S[k].left].filter(Boolean))]),
   ...Object.values(STATUS).map((s) => s.text),
-  ...LESSONS.flatMap((l) => [l.name, l.desc, ...l.steps.flatMap((s) => [s.title, s.goal, s.pass, ...s.how])]),
+  ...LESSONS.flatMap((l) => [l.name, l.desc, ...l.steps.flatMap((s) => [s.title, s.goal, ...(typeof s.pass === 'function' ? Object.values(LEVELS).map((L) => s.pass(L)) : [s.pass]), ...s.how])]),
 ];
 const bad = texts.filter((t) => han.test(t));
 ok('English: analysis, statuses and lessons have no Chinese', !bad.length, bad.slice(0, 3).join(' | '));
@@ -45,9 +46,14 @@ const gymTexts = [
   ...['flat', 'sharp', 'compress', 'stretch', 'up', 'down', 'degree', 'octave'].flatMap((key) => Object.values(G.findingText({ key, v: 30, w: 10, off: 9, n: 2 }))),
   ...['low', 'mid', 'high'].flatMap((bin) => Object.values(G.findingText({ key: 'register', bin, v: 40, w: 15 }))),
 ];
+const { problemsOf } = await import('../js/analysis/voiceState.js');
+gymTexts.push(...problemsOf({ spr: 30, F1: 700, F2: 1200, oq: 0.9, jitter: 3.5, larynx: 0.13, velum: 0 }).flatMap((p) => [p.text, p.fix]));
+gymTexts.push(...problemsOf({ spr: 15, F1: 700, F2: 1200, oq: 0.3, jitter: 3 }).flatMap((p) => [p.text, p.fix]));
+const { glossaryHtml } = await import('../js/ui/glossary.js');
+gymTexts.push(glossaryHtml(['frequency', 'spectrum', 'db', 'ring', 'ratio', 'peaks', 'formant', 'twang']));
 const badG = gymTexts.filter((t) => !t || han.test(t));
-ok('English: pitch trainer texts have no Chinese', !badG.length, badG.slice(0, 3).join(' | '));
-ok('English: dimension names', DIMS.map((d) => d.title).join(',') === 'Pitch,Rhythm,Breath,Technique,Expression');
+ok('English: pitch trainer and voice-scope texts have no Chinese', !badG.length, badG.slice(0, 3).join(' | '));
+ok('English: dimension names', DIMS.map((d) => d.title).join(',') === 'Pitch,Resonance,Breath,Technique,Expression');
 
 console.log(fails ? `\n${fails} FAILED` : '\nall i18n checks passed');
 process.exitCode = fails ? 1 : 0;

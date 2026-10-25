@@ -84,12 +84,54 @@ export function polyRoots(a, maxIter = 300) {
 }
 
 // Returns { formants:[{f,b}], env:{freqs, db}, fs }
-export function analyzeFormants(x, sr, order = 12, envPoints = 160) {
+// The poles of an LPC fit as formant candidates { f, b }, low to high.
+function polesOf(a, fs) {
+  const cands = [];
+  for (const [zr, zi] of polyRoots(a)) {
+    if (zi <= 0) continue;
+    const f = (Math.atan2(zi, zr) * fs) / (2 * Math.PI);
+    const b = (-Math.log(Math.hypot(zr, zi)) * fs) / Math.PI;
+    if (f > 90 && f < fs / 2 - 50 && b > 0 && b < 600) cands.push({ f, b });
+  }
+  return cands.sort((p, q) => p.f - q.f);
+}
+
+const HI_ORDER = 16;
+
+// Order 12 at 11 kHz is 6 pole pairs for five formants plus the source's tilt: it
+// misses F5 in most frames and merges F4 and F5 when they are close — as in twang,
+// the cluster the formant views are about. A 16th-order fit separates them but
+// blurs F1/F2 (it starts fitting the source and harmonics, and adds stray poles
+// below F3). So F1–F3 come from order 12, and F4/F5 are the 16th-order poles next
+// above the one matching F3. On synthetic vowels (f0 110–300 Hz, 44.1/48 kHz):
+// F4 error p50/p90 0.5/1.9 % (order 12: 1.8/5.2), F5 found in 68 % of frames with
+// 1.8/3.7 % (21 %, 4.9/9.3), the F3–F5 span within 78/156 Hz (158/317).
+function upperFormants(lo, hi) {
+  if (!lo[2]) return null;
+  const F3 = lo[2].f;
+  let j = -1, bd = Infinity;
+  hi.forEach((c, i) => { const d = Math.abs(c.f - F3); if (d < bd) { bd = d; j = i; } });
+  if (j < 0 || bd > 0.12 * F3) return null;
+  const up = [];
+  for (let i = j + 1, prev = hi[j].f; i < hi.length && up.length < 2; i++) {
+    if (hi[i].f < prev + 150) continue;
+    if (hi[i].f > 5000) break; // above: the resampling filter's edge, not the voice
+    up.push(hi[i]); prev = hi[i].f;
+  }
+  return up.length ? up : null;
+}
+
+// f5: F4 and F5 from a higher-order fit, which finds F5 and separates close F4/F5
+// (see upperFormants) — for the formant views
+export function analyzeFormants(x, sr, order = 12, envPoints = 160, { f5 = false } = {}) {
   const D = Math.max(1, Math.round(sr / TARGET_FS));
   const fs = sr / D;
   const h = lowpassTaps(D);
-  const L = 512; // ~46 ms at 11 kHz
-  const need = L * D + h.length;
+  // as many decimated samples as the frame fully covers (up to 512, ~46 ms at 11 kHz):
+  // letting the filter run off the frame's end made a false peak near 5 kHz
+  const L = Math.min(512, Math.floor((x.length - h.length) / D) + 1);
+  if (!(L >= 128)) return null;
+  const need = (L - 1) * D + h.length;
   const start = Math.max(0, x.length - need);
   const y = new Float64Array(L);
   for (let m = 0; m < L; m++) {
@@ -106,8 +148,9 @@ export function analyzeFormants(x, sr, order = 12, envPoints = 160) {
   const z = new Float64Array(L);
   for (let i = L - 1; i >= 1; i--) z[i] = (y[i] - pre * y[i - 1]) * w[i];
   z[0] = 0;
-  const r = new Float64Array(order + 1);
-  for (let k = 0; k <= order; k++) {
+  const P = f5 ? Math.max(order, HI_ORDER) : order;
+  const r = new Float64Array(P + 1);
+  for (let k = 0; k <= P; k++) {
     let s = 0;
     for (let i = k; i < L; i++) s += z[i] * z[i - k];
     r[k] = s;
@@ -115,29 +158,25 @@ export function analyzeFormants(x, sr, order = 12, envPoints = 160) {
   if (r[0] < 1e-12) return null;
   r[0] *= 1 + 1e-6;
   // Gaussian lag window (60 Hz) for numerical stability
-  for (let k = 1; k <= order; k++) r[k] *= Math.exp(-0.5 * Math.pow((2 * Math.PI * 60 * k) / fs, 2));
+  for (let k = 1; k <= P; k++) r[k] *= Math.exp(-0.5 * Math.pow((2 * Math.PI * 60 * k) / fs, 2));
   const { a, e } = levinson(r, order);
 
-  const roots = polyRoots(a);
-  const cands = [];
-  for (const [zr, zi] of roots) {
-    if (zi <= 0) continue;
-    const f = (Math.atan2(zi, zr) * fs) / (2 * Math.PI);
-    const mag = Math.hypot(zr, zi);
-    const b = (-Math.log(mag) * fs) / Math.PI;
-    if (f > 90 && f < fs / 2 - 50 && b > 0 && b < 600) cands.push({ f, b });
-  }
-  cands.sort((p, q) => p.f - q.f);
+  const cands = polesOf(a, fs);
 
   const formants = [];
   const ranges = [[180, 1300], [500, 3300], [1400, 4200], [2500, 5400]];
   let ci = 0;
-  for (let k = 0; k < 4; k++) {
+  for (let k = 0; k < ranges.length; k++) {
     const [lo, hi] = ranges[k];
     const prev = formants[k - 1];
     while (ci < cands.length && (cands[ci].f < lo || (prev && cands[ci].f < prev.f + 150))) ci++;
     if (ci < cands.length && cands[ci].f <= hi) { formants.push(cands[ci]); ci++; }
     else break;
+  }
+  // F4/F5 from a 16th-order fit (see upperFormants)
+  if (f5) {
+    const up = upperFormants(formants, polesOf(levinson(r, HI_ORDER).a, fs));
+    if (up) formants.splice(3, formants.length - 3, ...up);
   }
 
   // Spectral envelope 1/|A(e^jw)| on a log-frequency grid

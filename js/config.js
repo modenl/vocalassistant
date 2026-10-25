@@ -21,6 +21,7 @@ export const DEFAULT_SETTINGS = {
   deviceId: '',
   lang: 'auto', // 'auto' (system / browser language), 'zh' or 'en'
   refTimbre: 'voice', // reference notes: 'voice' (sung "ah") or 'piano'
+  twangLevel: 'easy', // twang lesson and voice scope: 'easy' | 'std' | 'strict' (analysis/twang.js LEVELS)
 };
 
 const SETTINGS_KEY = 'vocalassistant.settings.v1';

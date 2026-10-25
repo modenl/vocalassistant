@@ -21,11 +21,13 @@ export class VibratoAnalyzer {
 
   // Spectral analysis of the pitch contour: vibrato lives at 3.5–9 Hz; slow
   // (< 3 Hz) movement is phrasing/intonation and is deliberately ignored.
-  analyze() {
+  // minDur: ≥ 4 cycles of a 5.5 Hz vibrato by default at 0.75 s (pop long
+  // notes are often under a second); lessons ask for longer.
+  analyze(minDur = 0.75) {
     const p = this.pts;
-    if (p.length < 20) return (this.last = null);
+    if (p.length < 15) return (this.last = null);
     const t0 = p[0].t, dur = p[p.length - 1].t - t0;
-    if (dur < 1.0) return (this.last = null);
+    if (dur < minDur) return (this.last = null);
     const n = Math.floor(dur * FS);
     const y = new Float64Array(n);
     let j = 0;

@@ -3,8 +3,8 @@
 // must pass, a typical mistake must fail.
 import { FrameAnalyzer } from '../js/dsp/analyzer.js';
 import { Take } from '../js/lessons/runner.js';
-import { LESSONS } from '../js/lessons/lessons.js';
-import { DEFAULT_SETTINGS, VOICE_TYPES } from '../js/config.js';
+import { LESSONS, loadTwang, saveTwang } from '../js/lessons/lessons.js';
+import { DEFAULT_SETTINGS, VOICE_TYPES, midiName } from '../js/config.js';
 import { synth, hz, VOWELS } from '../tools/synth.mjs';
 
 const sr = 44100;
@@ -13,19 +13,20 @@ const ok = (name, cond, info) => { if (!cond) fails++; console.log(`${cond ? '�
 
 // muteUntil: frames before this time are heard while the reference tone plays
 // (the runner mutes them) — the reference must never pass a step.
-function judge(step, P, segs, { muteUntil = -1 } = {}) {
-  const x = Float32Array.from(synth(segs, sr));
-  const an = new FrameAnalyzer(sr), take = new Take(DEFAULT_SETTINGS), check = step.check(P);
+function judge(step, P, segs, { muteUntil = -1, ctx, gain, post } = {}) {
+  let x = Float32Array.from(synth(segs, sr, gain ? { gain } : {}));
+  if (post) x = post(x);
+  const an = new FrameAnalyzer(sr), take = new Take(DEFAULT_SETTINGS), check = step.check(P, ctx);
   let passed = false, ev, best = null;
   for (let end = an.N; end <= x.length; end += 1024) {
     const t = (end - an.N / 2) / sr;
-    take.push(an.analyze(x.subarray(end - an.N, end), { gateDb: -52, pitchOnly: true }), t, t < muteUntil);
+    take.push(an.analyze(x.subarray(end - an.N, end), { gateDb: -52, pitchOnly: !step.glottal, formants: 'compare' in step }), t, t < muteUntil);
     if (take.frames.length % 6 === 0) { ev = check(take); if (ev.pass) { passed = true; best = best || ev; } }
   }
   take.m.finish();
   ev = check(take);
   const final = ev.pass ? ev : best || ev; // the runner stops shortly after a pass
-  return { passed: passed || ev.pass, hint: ev.hint, score: final.score, parts: final.parts };
+  return { passed: passed || ev.pass, hint: ev.hint, score: final.score, parts: final.parts, save: final.save };
 }
 
 // voice: the synthesizer's level rises 6 dB/octave with f0 — amp ∝ 1/f0 keeps it even
@@ -146,6 +147,117 @@ band('long note with ±50 cents vibrato', SC_('sustain.s5', [{ ...hold(M + 2, 6)
 band('long note sagging 40 cents (step 1)', SC_('sustain.s5', [{ ...hold(M + 2, 6), f0: lin(M + 2, M + 1.6, 6) }, gap]), 70, 90);
 band('vibrato scores above a sagging note', SC_('sustain.s5', [{ ...hold(M + 2, 6), f0: vib(M + 2, 5.5, 50) }, gap]) > SC_('sustain.s5', [{ ...hold(M + 2, 6), f0: lin(M + 2, M + 1.6, 6) }, gap]) ? 1 : 0, 1, 1);
 band('octave arpeggio at even effort', SC_('noshout.arp', notes(arp, 0.6)), 85, 100);
+
+
+// the rule itself: more 2–4 kHz share than loudness (× 0.8), and ≥ 6 dB
+{
+  const { twangZone } = await import('../js/analysis/twang.js');
+  const z = [[8, 2], [8, 12], [7, 18], [3, 0], [10, 12], [2, 11]].map(([r, l]) => twangZone(r, l)).join(',');
+  ok('twang zones: +8/+2 twang, +8/+12 shout, +7/+18 shout, +3/0 plain, +10/+12 twang, +2/+11 shout', z === 'twang,shout,shout,plain,twang,shout', z);
+}
+// 咽音 / twang: judged against the singer's own plain glide at the same pitch, so
+// the twang may be sung on any note of the glide. Twang per Sundberg & Thalén
+// 2010: F1, F2 up, F3–F5 drawn together, firmer closure.
+{
+  const TWF = [{ f: 850, b: 70 }, { f: 1350, b: 80 }, { f: 2400, b: 90 }, { f: 2850, b: 90 }, { f: 3250, b: 110 }];
+  const G = 0.3; // fixed gain: loudness differences between takes are kept
+  const VV = { ...V, jitter: 0.003, shimmer: 0.03 };
+  const say = (m, x, dur = 3) => [gap, { dur, f0: () => hz(m), ...VV, ...x }, gap];
+  const plain = { vowel: VOWELS.a, oq: 0.55, sq: 2.4 }, twang = { vowel: TWF, oq: 0.42, sq: 3.0 }, shout = { vowel: VOWELS.a, oq: 0.4, sq: 3.2, amp: 2.5 };
+  // the plain glide D3 → C4 → D3 (6 s), then quiet: it is judged once it's over
+  const glide = (x) => [gap, { dur: 3, f0: lin(M - 3, M + 7, 3), ...VV, ...x }, { dur: 3, f0: lin(M + 7, M - 3, 3), ...VV, ...x }, { dur: 0.7 }];
+  const TJ = (id, want, segs, label, ctx, extra = {}) => { const r = judge(S[id], P, segs, { ctx, gain: G, ...extra }); ok(`${id}: ${label}`, r.passed === want, `passed=${r.passed} score=${r.score} — ${r.hint}`); return r; };
+  const b = TJ('twang.base', true, glide(plain), 'plain glide on “ah” → reference curve saved');
+  const C = b.save?.base?.curve;
+  ok('twang.base: the curve spans the glide', C && C.lo <= M - 2.5 && C.hi >= M + 6.5, C && `${C.lo}–${C.hi}, ${C.pts.length} points`);
+  TJ('twang.base', false, [gap, { dur: 4, f0: lin(M, M + 3, 4), ...VV, ...plain }, gap], 'a glide of only 3 semitones → not yet');
+  const ctx = { base: b.save.base };
+  TJ('twang.twang', false, say(M + 2, twang), 'without step 1 → asks for the reference', {});
+  // the point of the glide: twang on any note of it, against the plain voice there
+  for (const m of [M - 1, M + 2, M + 4, M + 6]) TJ('twang.twang', true, say(m, twang), `twang on ${midiName(m)} → pass`, ctx);
+  for (const m of [M - 1, M + 2, M + 4, M + 6]) TJ('twang.twang', false, say(m, plain), `plain on ${midiName(m)} → not twang`, ctx);
+  const vib = (m) => (t) => hz(m + 0.4 * Math.sin(2 * Math.PI * 5.5 * t));
+  TJ('twang.twang', true, [gap, { dur: 3, f0: vib(M + 3), ...VV, ...twang }, gap], 'twang with vibrato → pass', ctx);
+  TJ('twang.twang', false, [gap, { dur: 3, f0: vib(M + 3), ...VV, ...plain }, gap], 'plain with vibrato → not twang', ctx);
+  const sh = TJ('twang.twang', false, say(M + 4, shout), 'just louder → not twang (shouting)', ctx);
+  ok('twang.twang: shouting is named', /喊/.test(sh.hint), sh.hint);
+  const hard = TJ('twang.twang', false, say(M + 4, { vowel: VOWELS.a, oq: 0.3, sq: 5, amp: 4 }), 'hard shouting → still shouting', ctx);
+  ok('twang.twang: hard shouting is named', /喊/.test(hard.hint), hard.hint);
+  const br = TJ('twang.twang', false, say(M + 4, { vowel: VOWELS.a, oq: 0.7, sq: 2.0, noise: 0.6 }), 'breathy (air noise) → not twang', ctx);
+  ok('twang.twang: breathiness is named', /漏气/.test(br.hint), br.hint);
+  const sq = TJ('twang.twang', false, say(M + 2, { ...twang, jitter: 0.03, shimmer: 0.25, noise: 3 }), 'squeezed (rough) → not passed', ctx);
+  ok('twang.twang: squeezing is named', /挤/.test(sq.hint), sq.hint);
+  // the vocal folds' closure, against the plain voice at the same pitch
+  const bt = TJ('twang.twang', false, say(M + 2, { vowel: TWF, oq: 0.7, sq: 2.0, noise: 0.5 }), 'breathy twang (folds not closing) → not passed', ctx);
+  ok('twang.twang: air leaking is named', /漏气/.test(bt.hint) && !/挤了/.test(bt.hint), bt.hint);
+  const pr = TJ('twang.twang', false, say(M + 2, { vowel: TWF, oq: 0.3, sq: 5.0, jitter: 0.02, shimmer: 0.15 }), 'squeezed twang (tight, irregular) → not passed', ctx);
+  ok('twang.twang: squeezing is named', /挤了/.test(pr.hint), pr.hint);
+  const fm_ = TJ('twang.twang', true, say(M + 2, { vowel: TWF, oq: 0.3, sq: 5.0 }), 'firm but regular closure (twang) → pass', ctx);
+  ok('twang.twang: firm closure reported as closing well', fm_.parts?.some((p) => /闭合好/.test(p.text)), JSON.stringify(fm_.parts?.map((p) => p.text)));
+  const out = TJ('twang.twang', false, say(M - 7, twang), 'twang below the glide → asks to stay in range', ctx);
+  ok('twang.twang: the range is named', /范围/.test(out.hint), out.hint);
+  const EH = [{ f: 530, b: 70 }, { f: 1840, b: 90 }, { f: 2480, b: 110 }, { f: 3400, b: 150 }, { f: 4100, b: 200 }];
+  const EHT = [{ f: 610, b: 70 }, { f: 2100, b: 80 }, { f: 2450, b: 90 }, { f: 2850, b: 90 }, { f: 3250, b: 110 }]; // "eh" with twang
+  const vc = TJ('twang.twang', false, say(M + 2, { ...twang, vowel: EHT }), 'reference "ah", twang on "eh" → vowel differs', ctx);
+  ok('twang.twang: the vowel change is named', vc.hint.includes('元音和第 1 步不一样'), vc.hint);
+  const be = judge(S['twang.base'], P, glide({ vowel: EH }), { gain: G });
+  ok('twang.base on "eh": vowel recorded as 诶', be.passed && /诶/.test(be.hint), be.hint);
+  TJ('twang.twang', true, say(M + 2, { ...twang, vowel: EHT }), 'reference "eh", twang on "eh" → pass', { base: be.save.base });
+
+  // difficulty: a higher level asks for more ring (a tighter narrowing) and a longer hold
+  const A = VOWELS.a, mix = (k) => A.map((f, i) => ({ f: f.f + (TWF[i].f - f.f) * k, b: f.b + (TWF[i].b - f.b) * k }));
+  const light = { vowel: mix(0.6), oq: 0.42, sq: 3.0 };
+  TJ('twang.twang', true, say(M + 4, light, 5), 'light twang (≈ +9 dB) → passes beginner', { ...ctx, level: 'easy' });
+  TJ('twang.twang', false, say(M + 4, light, 5), 'light twang → not enough for standard', { ...ctx, level: 'std' });
+  TJ('twang.twang', false, say(M + 4, light, 5), 'light twang → not enough for strict', { ...ctx, level: 'strict' });
+  TJ('twang.twang', true, say(M + 2, twang, 5), 'clear twang (≈ +13 dB) held 4.7 s → passes strict', { ...ctx, level: 'strict' });
+  TJ('twang.twang', false, say(M + 2, twang, 3), 'clear twang held only 2.7 s → strict wants 4 s', { ...ctx, level: 'strict' });
+  const L3 = (await import('../js/analysis/twang.js')).levelOf('strict');
+  ok('twang levels: pass rule shows the level’s numbers', S['twang.twang'].pass(L3).includes('≥ 12 dB') && S['twang.twang'].pass(L3).includes('4 秒'));
+
+  // false passes found in review (Codex, 2026-10): none of these is twang
+  const hum = (x) => x.map((v, i) => v + 0.003 * Math.sin((2 * Math.PI * 3100 * i) / sr));
+  TJ('twang.twang', false, say(M + 2, plain), 'plain voice + a 3.1 kHz whine → not twang', ctx, { post: hum });
+  TJ('twang.twang', false, [gap, { dur: 1.7, f0: () => hz(M + 2), ...VV, ...twang }, { dur: 1.3, f0: () => hz(M + 2), ...VV, ...plain }, gap], 'twang 1.4 s then plain on one note → no pass', ctx);
+  for (const [what, broken] of [['the curve', { curve: null }], ['the vowel', { fm: null }], ['an old single-note reference', { curve: undefined, spr: 31, midi: 55 }]]) {
+    const r = TJ('twang.twang', false, say(M + 2, twang), `reference without ${what} → no pass`, { base: { ...ctx.base, ...broken } });
+    ok(`twang.twang: reference without ${what} → redo step 1`, /重做第 1 步/.test(r.hint), r.hint);
+  }
+
+  // nose pinched: compared with step 2 through the curve, so the note may differ
+  const tw = judge(S['twang.twang'], P, say(M + 2, twang), { ctx, gain: G });
+  const ctx2 = { ...ctx, twang: tw.save.twang };
+  TJ('twang.pinch', true, say(M + 2, twang), 'nose pinched, same twang → oral, pass', ctx2);
+  TJ('twang.pinch', true, say(M + 4, twang), 'nose pinched, same twang two semitones higher → pass', ctx2);
+  const nz = TJ('twang.pinch', false, say(M + 2, { vowel: VOWELS.n, oq: 0.42, sq: 3.0 }), 'nose pinched, sound goes dull → nasal twang', ctx2);
+  ok('twang.pinch: nasal twang is named', /鼻腔/.test(nz.hint), nz.hint);
+
+  // the five notes, placed inside the glide, each against the plain voice at its pitch
+  const SCL = S['twang.scale'].targets(P, ctx2);
+  ok('twang.scale: the notes sit inside the glide', SCL.every((m) => m >= C.lo - 0.5 && m <= C.hi + 0.5), SCL.map(midiName).join(' '));
+  const run = (x) => [gap, ...SCL.flatMap((m) => [{ dur: 0.5, f0: () => hz(m), ...VV, ...x }, { dur: 0.06 }]), gap];
+  TJ('twang.scale', true, run(twang), 'twang on every note → pass', ctx2);
+  TJ('twang.scale', false, run(plain), 'plain scale → twang lost', ctx2);
+  const shs = TJ('twang.scale', false, run(shout), 'shouted scale → not twang', ctx2);
+  ok('twang.scale: shouting named', /变响/.test(shs.hint), shs.hint);
+  const badCurve = { ...ctx2.base, curve: { ...C, pts: C.pts.map((p, i) => (i === 3 ? { ...p, hbr: NaN } : p)) } };
+  TJ('twang.scale', false, run(twang), 'a broken curve (NaN point) → no pass', { ...ctx2, base: badCurve });
+
+  // what is stored: complete records of the current reference only
+  const mem = new Map();
+  globalThis.localStorage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)) };
+  mem.set('vocalassistant.twang.v1', 'null');
+  ok('twang store: stored null → empty, no crash', JSON.stringify(loadTwang()) === '{}');
+  saveTwang({ base: b.save.base }); saveTwang({ twang: tw.save.twang });
+  const L1 = loadTwang();
+  ok('twang store: base and twang kept', !!(L1.base && L1.twang));
+  saveTwang({ base: { ...b.save.base, at: b.save.base.at + 1 } });
+  const L2 = loadTwang();
+  ok('twang store: a new reference drops the old twang', !!L2.base && !L2.twang);
+  mem.set('vocalassistant.twang.v1', JSON.stringify({ base: { midi: 55, spr: 31, vdb: -20, hnr: 20, bands: [0, 0, 0, 0, 0], fm: [730, 1150], at: 1 } }));
+  ok('twang store: an old single-note reference is not used', !loadTwang().base);
+  delete globalThis.localStorage;
+}
 
 console.log(fails ? `\n${fails} FAILED` : '\nall lesson checks passed');
 process.exitCode = fails ? 1 : 0;

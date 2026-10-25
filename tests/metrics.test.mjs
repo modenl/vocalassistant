@@ -128,32 +128,32 @@ function song({ beat = () => 0.6, jitter = 0.02 } = {}) {
   });
   return [...segs, { dur: 0.3 }];
 }
-S = run(song());
-ok('steady song (±20 ms) → 节拍均匀 + 速度稳定 good', S.beat.status === 'good' && S.tempo.status === 'good', `${S.beat.value} · ${S.tempo.value}`);
-S = run(song({ beat: (b) => 0.6 * (1 - (0.22 * b) / 48) }));
-ok('speeding up 22 % → 越唱越快 flagged', S.tempo.status !== 'good' && S.tempo.change > 0 && /快/.test(S.tempo.value), `${S.tempo.value}`);
-S = run(song({ jitter: 0.09 }));
-ok('sloppy timing (±90 ms) → 节拍均匀 not good, or no clear beat', S.beat.status !== 'good', `${S.beat.status} ${S.beat.value}`);
-// accents: legato syllables, every other one stressed (+7 dB) — the beat is in the
-// stresses even where single onsets are blurred
+// 8) 共鸣: the same melody on "ah" with and without the singer's formant cluster
+// (F3–F5 close together around 2.6–3.3 kHz), on a dull "oo", with room noise
+const RSEQ = [48, 50, 53, 55, 57, 60, 57, 53];
+const ringSong = (vowel, x = {}) => RSEQ.flatMap((m) => [{ ...note(m, 1.0), vowel, ...x }, gap]);
+S = run(ringSong(VOWELS.aRing));
+ok('singer\'s formant → 穿透力 good', S.ring.status === 'good' && S.dims.resonance.score != null, `${S.ring.value} · ${S.ringHigh.value}`);
+S = run(ringSong(VOWELS.u));
+ok('dull "oo" → 穿透力 not good', S.ring.status !== 'good', S.ring.value);
 {
-  const segs = [];
-  for (let i = 0; i < 64; i++) {
-    const m = [52, 55, 57, 55][i % 4], acc = i % 2 === 0;
-    segs.push({ ...note(m, 0.33), amp: lvl(m) * (acc ? 1 : 0.45), attack: 0.03, release: 0.02 });
-  }
-  S = run([...segs, { dur: 0.3 }]);
-  ok('stressed beats at 91/min (legato) → beat heard in the accents', S.beat.score != null && Math.abs(S.beat.bpm - 91) < 6, `${S.beat.value} · ${S.beat.detail.slice(0, 30)}`);
+  const x = synth(ringSong(VOWELS.aRing), sr);
+  let e = 0; for (const v of x) e += v * v;
+  const r = Math.sqrt(e / x.length) * 10 ** (-25 / 20);
+  let sd = 5; const rn = () => ((sd = (sd * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5) * 3.46;
+  const noisy = Float32Array.from(x, (v) => v + rn() * r);
+  const Sn = runPipeline(noisy, sr).summary, Sc = run(ringSong(VOWELS.aRing));
+  ok('room noise 25 dB below → same ring (within 2 dB)', Sn.ring.score != null && Math.abs(Sn.ring.spr - Sc.ring.spr) < 2, `${Sc.ring.spr.toFixed(1)} → ${Sn.ring.spr.toFixed(1)} dB`);
+  // noise that swamps the 2–4 kHz band of a dull voice: not judged, rather than judged wrong
+  const xu = synth(ringSong(VOWELS.u), sr);
+  let eu = 0; for (const v of xu) eu += v * v;
+  const ru = Math.sqrt(eu / xu.length) * 10 ** (-15 / 20);
+  const Sl = runPipeline(Float32Array.from(xu, (v) => v + rn() * ru), sr).summary;
+  ok('2–4 kHz under the room noise → resonance not judged (blocked)', Sl.ring.score == null && Sl.ring.blocked, Sl.ring.detail);
 }
-// wide leaps sung legato, sliding 0.25 s into each note (the old onset rules missed these)
-{
-  const LEAP = [49, 57, 54, 57, 49, 57, 54, 57, 50, 57, 54, 57, 49, 57, 54, 57, 50, 57, 54, 57, 49, 57, 54, 57, 49, 57, 54, 57];
-  const segs = LEAP.map((m, i) => { const p = i ? LEAP[i - 1] : m; return { ...note(m, 0.5), f0: (t) => hz(t < 0.25 ? p + (m - p) * (t / 0.25) : m), attack: i ? 0 : 0.04, release: 0 }; });
-  S = run([...segs, { dur: 0.3 }]);
-  ok('steady wide leaps with slides → beat found, 节拍均匀 good', S.beat.status === 'good', `${S.beat.value} ${S.beat.detail.slice(0, 40)}`);
-}
-S = run(seq([50, 53, 57, 55, 52], 2.5));
-ok('long-tone exercise → rhythm not judged', S.beat.status === 'na' && S.tempo.status === 'na' && S.dims.rhythm.score == null, S.beat.detail);
+// the ring fades on the top notes: the upper part of the range sung on "oo"
+S = run(RSEQ.flatMap((m) => [{ ...note(m, 1.0), vowel: m >= 55 ? VOWELS.u : VOWELS.aRing }, gap]));
+ok('ring lost on the top notes → 高音共鸣 flagged', S.ringHigh.status !== 'good' && S.ringHigh.loss > 6, S.ringHigh.value);
 
 // 9) 句尾掉音: phrase-final long notes sink 70 cents over their last 0.45 s
 const phrase = (m, end) => [note(m, 0.5), note(m + 2, 0.5), { ...note(m + 4, 1.2), f0: end(m + 4, 1.2) }, { dur: 0.4 }];
@@ -183,7 +183,18 @@ const phr = (k, amp) => [0, 2, 4, 2].map((d) => note(50 + d + (k % 3), 0.6, { am
 S = run(Array.from({ length: 10 }, (_, k) => [...phr(k, k % 2 ? 1 : 0.4), { dur: 0.4 }]).flat());
 ok('phrases 8 dB apart → 强弱对比 good', S.dynamics.status === 'good', S.dynamics.value);
 S = run(Array.from({ length: 10 }, (_, k) => [...phr(k, 1), { dur: 0.4 }]).flat());
-ok('every phrase equally loud → 强弱对比 not good', S.dynamics.status !== 'good', S.dynamics.value);
+ok('equally loud, only 24 s → not judged yet ("再唱约")', S.dynamics.status === 'na' && /再唱约/.test(S.dynamics.left), S.dynamics.detail);
+S = run(Array.from({ length: 18 }, (_, k) => [...phr(k, 1), { dur: 0.4 }]).flat());
+ok('equally loud over 43 s → 强弱对比 not good', S.dynamics.status === 'poor' || S.dynamics.status === 'ok', S.dynamics.value);
+{
+  // room noise 12 dB below the voice: the voice-only level keeps the contrast
+  const x = synth(Array.from({ length: 10 }, (_, k) => [...phr(k, k % 2 ? 1 : 0.4), { dur: 0.4 }]).flat(), sr);
+  let e = 0; for (const v of x) e += v * v;
+  const r = Math.sqrt(e / x.length) * 10 ** (-12 / 20);
+  let sd = 7; const rn = () => ((sd = (sd * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5) * 3.46;
+  const Sn = runPipeline(Float32Array.from(x, (v) => v + rn() * r), sr).summary, Sc = run(Array.from({ length: 10 }, (_, k) => [...phr(k, k % 2 ? 1 : 0.4), { dur: 0.4 }]).flat());
+  ok('noise 12 dB below → same contrast (within 1 dB)', Sn.dynamics.status === 'good' && Math.abs(Sn.dynamics.contrast - Sc.dynamics.contrast) < 1, `${Sc.dynamics.contrast.toFixed(1)} → ${Sn.dynamics.contrast.toFixed(1)} dB`);
+}
 
 // 12) dimensions and total
 S = run(song());
@@ -200,9 +211,6 @@ S = run(seq([50, 53], 0.6));
 ok('two notes → 音准 half way, "再唱 2 个稳定的音"', S.intonation.progress === 0.5 && /再唱 2 个/.test(S.intonation.left) && S.dims.pitch.score == null && S.total == null, `${Math.round(S.dims.pitch.progress * 100)}% ${S.dims.pitch.left}`);
 S = run(song());
 ok('a full song → total ready (100 %)', S.total != null && S.ready.progress === 1 && S.ready.scored >= 3, `ready ${JSON.stringify(S.ready)}`);
-rs = 101;
-S = run(Array.from({ length: 26 }, () => { const m = 50 + Math.floor(rnd() * 9); return [note(m, 0.3 + rnd() * 1.9), { dur: 0.1 + rnd() * 0.7 }]; }).flat());
-ok('free rhythm, plenty of notes → 节奏 "无法判断" (blocked), not "sing more"', S.dims.rhythm.score == null && S.dims.rhythm.blocked && S.beat.blocked, S.dims.rhythm.reason);
 // the note being sung counts towards progress while it lasts
 const live = new SingingMetrics();
 {
@@ -213,6 +221,21 @@ const live = new SingingMetrics();
 }
 S = live.summary(); // the 4th note is still sounding
 ok('the note being sung completes the count → "把这个音唱完"', S.intonation.score == null && S.intonation.progress === 0.95 && /唱完/.test(S.intonation.left), `${S.intonation.progress} ${S.intonation.left}`);
+
+// accompaniment: a melody over a bass line (and the bass alone, like an intro).
+// The bass is far below a baritone: not the singer; ring and dynamics not judged
+{
+  const mel = [55, 57, 59, 57, 55, 53, 55, 57], bassN = [34, 38, 41, 38];
+  const voice = synth([{ dur: 2.5 }, ...mel.flatMap((m) => [{ dur: 0.9, f0: () => hz(m), vowel: VOWELS.aRing, oq: 0.5, sq: 2.6 }, { dur: 0.15 }])], sr, { gain: 0.3 });
+  const bass = synth(Array.from({ length: Math.ceil(voice.length / sr / 1.2) }, (_, i) => ({ dur: 1.2, f0: () => hz(bassN[i % 4]), vowel: VOWELS.u, oq: 0.6, sq: 2 })), sr, { gain: 0.3 });
+  // the synthesizer is 6 dB quieter per octave down: lift the bass to a band's level
+  const mix = Float32Array.from(voice, (v, i) => v + 3 * (bass[i] || 0));
+  const Sb = runPipeline(mix, sr).summary, Sv = runPipeline(Float32Array.from(voice), sr).summary;
+  ok('accompaniment: a bass line under the melody is detected', Sb.accomp.detected, `${Math.round(Sb.accomp.share * 100)}% far below`);
+  ok('accompaniment: its notes aren’t the singer’s range', Sb.range?.lo >= 40, Sb.range && `${Sb.range.loName}–${Sb.range.hiName}`);
+  ok('accompaniment: ring not judged, dynamics not judged', Sb.ring.blocked && Sb.dynamics.status === 'na', Sb.ring.detail.slice(0, 30));
+  ok('the same melody alone: no accompaniment', !Sv.accomp.detected, `${(Sv.accomp.share * 100).toFixed(1)}%`);
+}
 
 console.log(fails ? `\n${fails} FAILED` : '\nall metric checks passed');
 process.exitCode = fails ? 1 : 0;

@@ -6,11 +6,25 @@ import { LiveView } from './ui/live.js';
 import { HistoryView } from './ui/history.js';
 import { LessonsView } from './ui/lessons.js';
 import { GymView } from './ui/gym.js';
+import { ScopeView } from './ui/scope.js';
+import { AlongView } from './ui/along.js';
 import { renderSettings } from './ui/settings.js';
+
+const TABS = ['live', 'lessons', 'gym', 'scope', 'along', 'history', 'settings'];
 
 const app = {
   settings: loadSettings(),
   tab: 'live',
+
+  // Every page has an address: #/lessons/twang/2, #/history/<id>, #/scope …
+  // Views call route() when what they show changes; the address bar, reload,
+  // bookmarks and the back / forward buttons then work.
+  route(parts, { replace = false } = {}) {
+    const h = '#/' + parts.filter((x) => x != null && x !== '').map((x) => encodeURIComponent(x)).join('/');
+    if (location.hash === h) return;
+    // while following an address (load, back / forward), correct it in place
+    if (replace || this.following) history.replaceState(null, '', h); else history.pushState(null, '', h);
+  },
 
   updateSettings(patch) {
     Object.assign(this.settings, patch);
@@ -34,12 +48,29 @@ const app = {
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === `tab-${name}`));
     if (name !== 'lessons') this.lessons.stopRunner();
     if (name !== 'gym') await this.gym.stop();
-    if (name === 'lessons') this.lessons.show(arg);
+    if (name !== 'scope') await this.scope.stop();
+    if (name !== 'along') await this.along.stop();
+    if (name !== 'lessons' && name !== 'history') this.route([name]);
+    if (name === 'lessons') this.lessons.show(...(Array.isArray(arg) ? arg : [arg]));
     if (name === 'gym') this.gym.show();
+    if (name === 'scope') this.scope.show();
+    if (name === 'along') this.along.show();
     if (name === 'history') await this.history.show(arg);
     if (name === 'settings') await renderSettings(document.getElementById('tab-settings'), this);
     if (name === 'live' && !this.live.engine.running) this.live.drawIdle();
     window.scrollTo({ top: 0 });
+  },
+
+  // the page the address asks for (on load, and on back / forward)
+  async fromAddress() {
+    const [tab, a, b] = location.hash.replace(/^#\/?/, '').split('/').map((x) => decodeURIComponent(x));
+    const name = TABS.includes(tab) ? tab : 'live';
+    this.following = true;
+    try {
+      if (name === 'lessons') await this.showTab('lessons', [a || null, b ? +b : null]);
+      else if (name === 'history') await this.showTab('history', a || null);
+      else await this.showTab(name);
+    } finally { this.following = false; }
   },
 };
 
@@ -71,7 +102,10 @@ function init() {
   app.history = new HistoryView(app, document.getElementById('tab-history'));
   app.lessons = new LessonsView(app, document.getElementById('tab-lessons'));
   app.gym = new GymView(app, document.getElementById('tab-gym'));
+  app.scope = new ScopeView(app, document.getElementById('tab-scope'));
+  app.along = new AlongView(app, document.getElementById('tab-along'));
   app.live.init();
+  window.addEventListener('popstate', () => app.fromAddress());
   document.getElementById('tabs').onclick = (e) => {
     const b = e.target.closest('button');
     if (b) app.showTab(b.dataset.tab);
@@ -80,6 +114,9 @@ function init() {
     document.getElementById('status').textContent = L('⚠ 麦克风需要 https 或 localhost 环境。', '⚠ The microphone needs https or localhost.');
   }
   window.vocalApp = app; // handy for debugging in the console
+  // open the page the address names (a bookmark, a shared link, a reload)
+  if (/^#\/./.test(location.hash)) app.fromAddress();
+  else app.route(['live'], { replace: true });
 }
 
 init();

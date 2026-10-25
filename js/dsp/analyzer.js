@@ -7,6 +7,25 @@ import { analyzeFormants, formantCorrection, vocalTractLength } from './lpc.js';
 
 // ≈46 ms at 44.1/48 kHz: two periods of the lowest sung notes (~E2), and short
 // enough that vibrato up to ~9 Hz is not averaged away by the window.
+// F5 only where the voice has energy: a harmonic near it within 65 dB of the
+// strongest and standing out of the noise. Where the highs are that weak (e.g.
+// "oo", ≈ 80 dB down) LPC puts a stray pole up there; a real F5 of an open or
+// front vowel sits ≈ 50–58 dB down, twang's ≈ 30.
+// (Looked up in the spectrum itself: the harmonic list stops at the 40th, below
+// F5 for a low voice.)
+function dropUnheardF5(formants, an, hs, f0) {
+  const F5 = formants?.[4]?.f;
+  if (!F5 || !hs?.length) return;
+  const { specDb, binHz } = an, top = Math.max(...hs.map((h) => h.db));
+  const w = Math.max(f0, 0.08 * F5), lo = Math.max(1, Math.floor((F5 - w) / binHz)), hi = Math.min(specDb.length - 1, Math.ceil((F5 + w) / binHz));
+  let b = lo;
+  for (let i = lo; i <= hi; i++) if (specDb[i] > specDb[b]) b = i;
+  const half = Math.max(2, Math.round((0.5 * f0) / binHz));
+  let valley = Infinity;
+  for (let i = Math.max(0, b - half); i <= Math.min(specDb.length - 1, b + half); i++) valley = Math.min(valley, specDb[i]);
+  if (!(specDb[b] >= top - 65 && specDb[b] - valley >= 6)) formants.length = 4;
+}
+
 export function frameSizeFor(sr) {
   return sr > 70000 ? 4096 : 2048;
 }
@@ -54,10 +73,114 @@ export class FrameAnalyzer {
     return s;
   }
 
+  // A voice's harmonic series at `f` (or the octave above / below — the
+  // estimator's usual slips): of harmonics 1–10 below 4.5 kHz, ≥ 3 stand ≥ 10 dB
+  // above the noise floor (spectrum median, 80–5000 Hz), two of them adjacent.
+  // Returns the f0 that fits, or 0.
+  harmonicF0(f) {
+    if (!(f > 0)) return 0;
+    const sp = this.specDb, b = this.binHz;
+    const vals = Array.from(sp.subarray(this.bin(80), this.bin(5000)));
+    vals.sort((p, q) => p - q);
+    const floor = vals[vals.length >> 1];
+    for (const g of [f, 2 * f, f / 2]) {
+      if (g < 70 || g > 1100) continue;
+      let n = 0, run = 0, best = 0;
+      for (let h = 1; h <= 10 && h * g < 4500; h++) {
+        const c = Math.round((h * g) / b), w = Math.max(1, Math.round((0.03 * h * g) / b));
+        let pk = -Infinity;
+        for (let k = c - w; k <= c + w; k++) if (sp[k] > pk) pk = sp[k];
+        if (pk - floor >= 10) { n++; best = Math.max(best, ++run); } else run = 0;
+      }
+      if (n >= 3 && best >= 2) return g;
+    }
+    return 0;
+  }
+
+  // The voice's own level, room noise left out: the power at the harmonics of
+  // f0 (below 5 kHz, ±2 bins around each peak) minus the noise measured between
+  // the harmonics in this frame (median power of those bins). Noise between the
+  // harmonics never counts, and what it adds under them is subtracted. In dB
+  // (relative: compare it with itself, not with `db`).
+  voiceDb(f0) {
+    const P = this.specPow, b = this.binHz, top = Math.min(this.bin(5000), P.length - 3);
+    const isH = new Uint8Array(top + 3), rad = Math.max(2, Math.round((0.25 * f0) / b));
+    for (let k = 1; k * f0 < 5000; k++) {
+      const c = Math.round((k * f0) / b);
+      for (let i = Math.max(1, c - rad); i <= Math.min(top, c + rad); i++) isH[i] = 1;
+    }
+    const between = [];
+    for (let i = this.bin(80); i <= top; i++) if (!isH[i]) between.push(P[i]);
+    between.sort((x, y) => x - y);
+    const noise = between.length ? between[between.length >> 1] : 0;
+    let v = 0, h = 0, nb = 0, vLo = 0, vHi = 0;
+    for (let k = 1; k * f0 < 5000; k++) {
+      const c = Math.round((k * f0) / b);
+      let m = c;
+      for (let i = Math.max(1, c - rad); i <= Math.min(top, c + rad); i++) if (P[i] > P[m]) m = i;
+      for (let i = Math.max(1, m - 2); i <= Math.min(top, m + 2); i++) { v += Math.max(0, P[i] - noise); h += P[i]; }
+      // the band ratio below counts only a local peak right at k·f0, so a
+      // narrow-band sound between the harmonics (a whine, a beep) is left out
+      const x = (k * f0) / b, w = 1 + Math.floor((k * f0 * 0.004) / b);
+      let q = Math.max(1, Math.round(x) - w);
+      for (let i = q; i <= Math.min(top, Math.round(x) + w); i++) if (P[i] > P[q]) q = i;
+      if (Math.abs(q - x) <= w && P[q] >= P[q - 1] && P[q] >= P[q + 1]) {
+        let e = 0;
+        for (let i = Math.max(1, q - 2); i <= Math.min(top, q + 2); i++) e += Math.max(0, P[i] - noise);
+        if (k * f0 < 2000) vLo += e; else if (k * f0 <= 4000) vHi += e;
+      }
+    }
+    // harmonic band ratio: all the voice's harmonic power in 0–2 kHz over that in
+    // 2–4 kHz (dB), room noise taken off. Like the singing power ratio, but summed
+    // over the band instead of its strongest harmonic: when only the pitch moves,
+    // single harmonics slide on and off the formant peaks (±6 dB a semitone) while
+    // a band's total barely changes — so a voice can be compared across notes.
+    this.lastHbr = vLo > 0 && vHi > 0 ? 10 * Math.log10(vLo / vHi) : NaN;
+    for (const q of between) nb += q;
+    // harmonics vs what lies between them (breath noise, roughness, room noise):
+    // compare it only within one recording (same room), not across takes
+    this.lastHnr = 10 * Math.log10((h + 1e-20) / (nb + 1e-20));
+    return 10 * Math.log10(v + 1e-20);
+  }
+
+  // Spectral shape of a voiced frame: level of five bands relative to their
+  // sum (dB) — 80–500, 500–1000, 1000–2000, 2000–4000, 4000–6000 Hz.
+  bandShape() {
+    const P = this.specPow, edges = [80, 500, 1000, 2000, 4000, 6000], e = [];
+    let tot = 0;
+    for (let j = 0; j < 5; j++) {
+      let s = 0;
+      for (let i = this.bin(edges[j]); i < this.bin(edges[j + 1]); i++) s += P[i];
+      e.push(s); tot += s;
+    }
+    return e.map((x) => 10 * Math.log10((x + 1e-20) / (tot + 1e-20)));
+  }
+
+  bandMedianDb(f1, f2) {
+    const v = Array.from(this.specDb.subarray(this.bin(f1), this.bin(f2) + 1)).sort((a, b) => a - b);
+    return v[v.length >> 1];
+  }
+
   bandMaxDb(f1, f2) {
     let m = -Infinity;
     for (let k = this.bin(f1), e = this.bin(f2); k <= e; k++) if (this.specDb[k] > m) m = this.specDb[k];
     return m;
+  }
+
+  // Strongest harmonic of f0 between f1 and f2 (dB), or NaN. Only a local peak
+  // at k·f0 counts, so a narrow-band sound that isn't the voice (a hum, a whine,
+  // a beep between the harmonics) can't pass for the voice's ring.
+  harmonicMaxDb(f0, f1, f2) {
+    const { specDb, binHz } = this, top = specDb.length - 2;
+    let m = -Infinity;
+    for (let k = Math.max(1, Math.ceil(f1 / f0)); k * f0 <= f2; k++) {
+      const c = (k * f0) / binHz, w = 1 + Math.floor((k * f0 * 0.004) / binHz);
+      const lo = Math.max(1, Math.round(c) - w), hi = Math.min(top, Math.round(c) + w);
+      let b = lo;
+      for (let i = lo; i <= hi; i++) if (specDb[i] > specDb[b]) b = i;
+      if (specDb[b] >= specDb[b - 1] && specDb[b] >= specDb[b + 1] && Math.abs(b - c) <= w && specDb[b] > m) m = specDb[b];
+    }
+    return Number.isFinite(m) ? m : NaN;
   }
 
   analyze(x, opts = {}) {
@@ -72,13 +195,16 @@ export class FrameAnalyzer {
     this.computeSpectrum(x);
 
     const out = {
-      rms, db, voiced: false, f0: 0, clarity: 0, irregular: false, transient: false, polyphonic: false,
+      rms, db, voiced: false, f0: 0, clarity: 0, hiMed: NaN, hiPk: NaN, vdb: NaN, hnrLite: NaN, hbr: NaN, bands: null, irregular: false, transient: false, polyphonic: false,
       spec: this.specDb, binHz: this.binHz,
       harmonics: [], h1h2: NaN, h1h2c: NaN, hslope: NaN, h2h4: NaN, oq: NaN,
       alpha: NaN, spr: NaN, centroid: NaN, richness: NaN, strongHarm: 0,
       hnr: NaN, cpp: NaN, jitter: NaN, shimmer: NaN,
       formants: [], env: null, formantReliable: false, vtl: 0, nasal: NaN, nasalRaw: NaN,
     };
+    // the 2–4 kHz band (singer's formant): its median level, over the take a
+    // measure of the room noise there (resonance is judged only well above it)
+    out.hiMed = this.bandMedianDb(2000, 4000);
     if (db < gateDb) return out;
 
     // Frames straddling a note onset/offset (one half much quieter than the
@@ -93,13 +219,28 @@ export class FrameAnalyzer {
     out.f0 = p.f0; out.clarity = p.clarity;
     if (p.clarity > 0.72 && p.f0 > 40) out.voiced = true;
     else if (p.f0 > 20 && p.f0 < 110 && p.clarity > 0.4) { out.voiced = true; out.irregular = true; }
+    else {
+      // Waveform periodicity suffers from room noise, reverb and breathy tone,
+      // but a sung vowel still shows a series of harmonic peaks well above the
+      // noise floor. Such a frame is "weak": the pitch tracker keeps it only as
+      // part of a continuing note (see pitch.js). The estimator's sub-octave
+      // picks are corrected here: a series needs neighbouring harmonics.
+      const f = this.harmonicF0(p.f0);
+      if (f) { out.voiced = true; out.weak = true; out.f0 = f; }
+    }
     if (!out.voiced) return out;
-    const f0 = p.f0;
+    const f0 = out.f0;
 
     // Spectral balance measures
     const pLow = this.bandPower(50, 1000), pHigh = this.bandPower(1000, 5000);
     out.alpha = 10 * Math.log10((pHigh + 1e-20) / (pLow + 1e-20));
-    out.spr = this.bandMaxDb(50, 2000) - this.bandMaxDb(2000, 4000); // Omori et al. 1996
+    out.vdb = this.voiceDb(f0);
+    out.hnrLite = this.lastHnr;
+    out.hbr = this.lastHbr;
+    out.bands = this.bandShape();
+    // singing power ratio (Omori et al. 1996), from the voice's harmonics only
+    out.hiPk = this.harmonicMaxDb(f0, 2000, 4000);
+    out.spr = this.harmonicMaxDb(f0, 50, 2000) - out.hiPk;
     let num = 0, den = 0;
     for (let k = this.bin(50), e = this.bin(8000); k <= e; k++) { num += k * this.binHz * this.specPow[k]; den += this.specPow[k]; }
     out.centroid = den > 0 ? num / den : NaN;
@@ -126,6 +267,11 @@ export class FrameAnalyzer {
       }
     }
     // pitch-only mode: voicing, f0 and level are all the app needs
+    // pitch-only mode can still ask for the formants (the twang lesson's vowel check)
+    if (opts.pitchOnly && opts.formants) {
+      const fr = analyzeFormants(x, sr, 12, 160, { f5: true });
+      if (fr) { dropUnheardF5(fr.formants, this, hs, f0); out.formants = fr.formants; out.formantReliable = f0 < 350 && fr.formants.length >= 3; }
+    }
     if (opts.pitchOnly) return out;
     if (hs.length >= 2) {
       const hmax = Math.max(...hs.map((h) => h.db));
@@ -139,12 +285,13 @@ export class FrameAnalyzer {
     }
 
     // Formants (LPC) — only trustworthy for moderate f0
-    const fr = analyzeFormants(x, sr, 12);
+    const fr = analyzeFormants(x, sr, 12, 160, { f5: !!opts.f5 });
     if (fr) {
+      if (opts.f5) dropUnheardF5(fr.formants, this, hs, f0);
       out.formants = fr.formants;
       out.env = fr.env;
       out.formantReliable = f0 < 350 && fr.formants.length >= 3;
-      if (out.formantReliable) out.vtl = vocalTractLength(fr.formants);
+      if (out.formantReliable) out.vtl = vocalTractLength(fr.formants.slice(0, 4));
     }
     out.h1h2c = out.h1h2;
     out.h1h2Corrected = false;
