@@ -69,10 +69,10 @@ export function score(frames) {
 }
 
 // rate 1 uses the song itself (no capture)
-export async function run(rate) {
+export async function run(rate, variant = '') {
   const mix = song();
   const c = rate === 1 ? { x: mix, a: 0, b: 1 } : await capture(mix, rate);
-  const r = await separateVocals(c.x), m = await extractMelody(r.vocals, 440, { rate });
+  const r = await separateVocals(c.x, { variant }), m = await extractMelody(r.vocals, 440, { rate });
   const frames = m.frames.map((f) => ({ t: c.a + (c.b / rate) * f.t, midi: f.midi }));
-  return { rate, ...score(frames), sepSecs: +r.secs.toFixed(1), device: r.device };
+  return { rate, variant, ...score(frames), sepSecs: +r.secs.toFixed(1), device: r.device, model: r.model };
 }

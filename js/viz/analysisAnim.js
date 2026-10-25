@@ -76,12 +76,13 @@ export class AnalysisAnim {
     this.total = Math.max(1, Math.ceil(Math.max(0, this.secs - SEG) / STRIDE) + 1);
   }
 
-  update({ stage, progress, device, part, bytes, total }) {
+  update({ stage, progress, device, part, bytes, total, model }) {
     const now = performance.now();
     if (stage && stage !== this.stage) { this.stage = stage; this.stageAt[stage] = now; if (stage === 'separate' && !this.sepT0) { this.sepT0 = now; this.lastSegAt = now; } }
     if (stage === 'load' && !this.sepT0) { this.sepT0 = 0; }
     if (progress != null) this.progress = progress;
     if (device) this.device = device;
+    if (model) this.model = model;
     if (bytes != null) { this.bytes = bytes; this.bytesTotal = total; }
     if (part && this.vox) {
       // this stretch's vocal and band (the overlap: the newer one)
@@ -164,7 +165,7 @@ export class AnalysisAnim {
     const N = order.length, idx = cur === 'end' ? N : order.indexOf(cur);
     const names = [...(this.capture ? [this.scale === 1 ? L('录下原曲', 'Record the song') : L(`${this.scale} 倍速录下原曲`, `Record at ${this.scale}×`)] : []), L('载入分离模型', 'Load the model'), L('分离人声与伴奏', 'Separate vocal / band'), L('提取原唱旋律', 'Extract the melody')];
     const subs = [...(this.capture ? [this.open ? `${fmt(this.got)}` : `${fmt(this.got * this.scale)} / ${fmt(this.secs * this.scale)}`] : []),
-      this.stage === 'download' && this.bytesTotal ? `${(this.bytes / 1e6).toFixed(0)} / ${(this.bytesTotal / 1e6).toFixed(0)} MB` : 'Demucs v4 · htdemucs',
+      this.stage === 'download' && this.bytesTotal ? `${(this.bytes / 1e6).toFixed(0)} / ${(this.bytesTotal / 1e6).toFixed(0)} MB` : this.model === 'umx-hq' ? 'Open-Unmix · UMX-HQ' : 'Demucs v4 · htdemucs',
       this.device ? `${this.device === 'webgpu' ? 'WebGPU' : 'CPU'} · ${this.done}/${this.total} ${L('段', 'parts')}` : `${this.total} × 7.8 s`,
       'MELODIA · Essentia.js',
     ];

@@ -1,6 +1,5 @@
 // "跟原唱唱" / Sing along. Two steps, in this order and no other:
-//   ① analyse the original — a YouTube video (played once at 1.5× by the
-//      page), a Bilibili video or a song on any other site (played once by the
+//   ① analyse the original — a YouTube video (played once by the page), a Bilibili video or a song on any other site (played once by the
 //      singer, only to be analysed: their sound shared from the tab), or a song
 //      file: Demucs separates the lead vocal, MELODIA follows it; meanwhile
 //      nothing on the page can be used;
@@ -15,7 +14,7 @@ import { AudioEngine } from '../audio/engine.js';
 import { FrameAnalyzer } from '../dsp/analyzer.js';
 import { PitchTracker } from '../analysis/pitch.js';
 import { decodeSong, extractMelody, resampleTo44k } from '../along/melody.js';
-import { separateVocals, releaseSeparator } from '../along/separate.js';
+import { separateVocals, releaseSeparator, sepModel } from '../along/separate.js';
 import { AnalysisAnim } from '../viz/analysisAnim.js';
 import { videoIdOf, createPlayer, bilibiliEmbedOf } from '../along/youtube.js';
 import { features, locate, RATE as AL_RATE } from '../along/align.js';
@@ -30,11 +29,13 @@ import { pitchNowHtml } from './pitchNow.js';
 import { L } from '../i18n.js';
 import { dlog, dlogStart } from '../dlog.js';
 
-// A YouTube video is analysed from its sound played once, faster. A synthetic
-// song with a known melody, sped up by the browser (pitch kept), captured and
-// analysed (Demucs + MELODIA): 95 % of moments right at 1×, 92 % at 1.5×, 74 %
-// at 2× — Demucs was trained on music at its real tempo (tools/speedtest.js)
-const PRE_RATE = 1.5;
+// A video (YouTube, a file) is analysed from its sound played once, at its own
+// speed. Faster would be quicker, but a synthetic song with a known melody,
+// sped up by the browser (pitch kept), captured and analysed found fewer of
+// its notes: Demucs 95 % of moments right at 1×, 92 % at 1.5×, 74 % at 2×;
+// Open-Unmix 78 % at 1×, 60 % at 1.5× (tools/speedtest.js). The code still
+// takes a rate (and tells MELODIA the pace), should one be wanted again.
+const PRE_RATE = 1;
 
 // The analysis step being run, kept in localStorage: a phone that runs out
 // of memory reloads the page without a word ("a problem repeatedly
@@ -110,7 +111,7 @@ export class AlongView {
           <span><b style="color:${ALONG_COLORS.mine}">A3</b> ${L('橙字 = 你唱的音名', 'orange = the note you sang')}</span>
           <span><i style="background:rgba(154,163,181,0.45)"></i>${L('灰色 = 你没唱的地方，当作伴奏，不计分', 'grey = where you didn’t sing: taken as accompaniment, not scored')}</span>
         </div>
-        <p class="muted al-cap">${L(`分析怎么做：YouTube 视频以 ${PRE_RATE} 倍速放一遍，程序录下这个标签页的声音（浏览器会问你共享什么：选“这个标签页”，打开“同时分享标签页音频”；只支持电脑版 Chrome / Edge）；歌曲文件直接读。然后用 Demucs 把人声从伴奏里分出来，再用 MELODIA 算法提取原唱的旋律（Essentia.js），全在你的电脑上算，不上传、不保存。`, `How the analysis works: a YouTube video plays once at ${PRE_RATE}× while the app records this tab’s sound (the browser asks what to share: pick “This tab” and turn on “Also share tab audio”; desktop Chrome / Edge only); a song file is read directly. Demucs then separates the vocal from the band and the MELODIA algorithm extracts the original’s melody (Essentia.js) — all on your computer, nothing uploaded or stored.`)}</p>
+        <p class="muted al-cap">${L(`分析怎么做：YouTube 视频从头放一遍，程序录下这个标签页的声音（浏览器会问你共享什么：选“这个标签页”，打开“同时分享标签页音频”；只支持电脑版 Chrome / Edge）；歌曲文件直接读。然后用 Demucs 把人声从伴奏里分出来，再用 MELODIA 算法提取原唱的旋律（Essentia.js），全在你的电脑上算，不上传、不保存。`, `How the analysis works: a YouTube video plays once from the start while the app records this tab’s sound (the browser asks what to share: pick “This tab” and turn on “Also share tab audio”; desktop Chrome / Edge only); a song file is read directly. Demucs then separates the vocal from the band and the MELODIA algorithm extracts the original’s melody (Essentia.js) — all on your computer, nothing uploaded or stored.`)}</p>
         <h4 class="ls-h">${L('频谱对照：同一时刻的原唱和你', 'Spectra: the original and you at the same moment')}</h4>
         <canvas class="viz" id="alSpec" style="height:270px"></canvas>
         <div id="alCards"></div>
@@ -173,7 +174,7 @@ export class AlongView {
   }
 
   // ① a YouTube video: share this tab's sound (asked first: the browser only
-  // allows it right after a click), load the player, play it once at 1.5×
+  // allows it right after a click), load the player, play it once
   // while recording, then the same analysis as a song file. Song time = the
   // video's own time: a straight line fitted to (seconds recorded,
   // player.getCurrentTime()) pairs maps the recording onto it.
@@ -218,12 +219,12 @@ export class AlongView {
   // recorded, player time) pairs maps the recording onto it. Stops at the end,
   // when `ended` (a track) ends, or if nothing plays for 12 s.
   // → { x (44.1 kHz), rate, a, b: song time = a + b · seconds of x } or null (nothing heard)
-  async capturePlayer(song, P, ctx, src, { ended: track = null } = {}) {
+  async capturePlayer(song, P, ctx, src, { ended: track = null, rate: want = PRE_RATE } = {}) {
     const $ = this.$;
     await ctx.audioWorklet.addModule(new URL('../audio/capture-worklet.js', import.meta.url));
     const node = new AudioWorkletNode(ctx, 'vocal-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' }), sink = ctx.createGain();
     sink.gain.value = 0; src.connect(node); node.connect(sink).connect(ctx.destination); // heard by the analysis only
-    const rate = (P.getAvailablePlaybackRates?.() || [1]).includes(PRE_RATE) ? PRE_RATE : 1;
+    const rate = (P.getAvailablePlaybackRates?.() || [1]).includes(want) ? want : 1;
     const dur = P.getDuration?.() || 0, chunks = [], marks = [];
     let n = 0, ended = null;
     const done = new Promise((r) => { ended = r; });
@@ -243,8 +244,9 @@ export class AlongView {
     if (track) track.onended = () => ended();
     const box = $('alSep');
     markStep('record', song);
-    box.className = 'al-sep busy'; box.querySelector('.al-sep-t').textContent = L(`第 1 步：视频以 ${rate} 倍速放一遍，录下它的声音（只在内存里）`, `Step 1: the video plays once at ${rate}× while its sound is recorded (in memory only)`);
-    this.say(L(`正在分析，请稍候，分析完才能开始唱（一首 4 分钟的歌约 ${Math.round(4 / rate + 1.5)} 分钟）…`, `Analysing — please wait; singing starts once it’s done (about ${Math.round(4 / rate + 1.5)} min for a 4-minute song)…`));
+    const speed = rate === 1 ? '' : L(`以 ${rate} 倍速`, ` at ${rate}×`), mins = Math.round(4 / rate + (sepModel() === 'umx' ? 0.5 : 1.5));
+    box.className = 'al-sep busy'; box.querySelector('.al-sep-t').textContent = L(`第 1 步：视频${speed}放一遍，录下它的声音（只在内存里）`, `Step 1: the video plays once${speed} while its sound is recorded (in memory only)`);
+    this.say(L(`正在分析，请稍候，分析完才能开始唱（一首 4 分钟的歌约 ${mins} 分钟）…`, `Analysing — please wait; singing starts once it’s done (about ${mins} min for a 4-minute song)…`));
     try { P.seekTo(0, true); P.setPlaybackRate(rate); P.playVideo(); } catch { /* it will be caught by the timeout below */ }
     const fillIv = setInterval(() => { box.querySelector('.fill').style.width = `${Math.round(100 * Math.min(1, (n / ctx.sampleRate) / Math.max(1, dur / rate)))}%`; }, 250);
     // a video that never starts (blocked autoplay, an embed refused by its owner)
@@ -290,19 +292,21 @@ export class AlongView {
     // the tap: the audio context and the playing both have to start inside it
     const go = $('alTapGo');
     go.hidden = false;
-    this.say(L(`点视频上的“▶ 点这里开始分析”：视频会以 ${PRE_RATE} 倍速放一遍给程序听（你听不到），之后才能唱。`, `Tap “▶ Tap to start the analysis” on the video: it plays once at ${PRE_RATE}× for the app to hear (you won’t), then you can sing.`));
+    const rate = PRE_RATE;
+    this.say(rate === 1 ? L('点视频上的“▶ 点这里开始分析”：视频会放一遍给程序听（你听不到），之后才能唱。', 'Tap “▶ Tap to start the analysis” on the video: it plays once for the app to hear (you won’t), then you can sing.')
+      : L(`点视频上的“▶ 点这里开始分析”：视频会以 ${rate} 倍速放一遍给程序听（你听不到），之后才能唱。`, `Tap “▶ Tap to start the analysis” on the video: it plays once at ${rate}× for the app to hear (you won’t), then you can sing.`));
     const { ctx, src } = await new Promise((ok) => {
       go.onclick = () => {
         go.hidden = true;
         dlog('tap');
         const c = new AudioContext(); c.resume();
         const s = c.createMediaElementSource(el); // from now on its sound goes to the analysis only
-        el.muted = false; el.playbackRate = PRE_RATE; el.play().catch(() => {});
+        el.muted = false; el.playbackRate = rate; el.play().catch(() => {});
         ok({ ctx: c, src: s });
       };
     });
     $('alYtLock').hidden = false;
-    const r = await this.capturePlayer(song, this.player, ctx, src);
+    const r = await this.capturePlayer(song, this.player, ctx, src, { rate });
     dlog('captured', r ? { secs: +(r.x.length / 44100).toFixed(1), a: +r.a.toFixed(3), b: +r.b.toFixed(4) } : { none: true });
     if (this.song !== song) return;
     if (!r) { fail(L('没录到视频的声音（视频没有声音，或者没放起来）。', 'The video’s sound wasn’t recorded (it has none, or didn’t play).')); return; }
@@ -682,7 +686,7 @@ export class AlongView {
     try {
       const r = await separateVocals(x, {
         onProgress: (d) => { anim.update(d); const { stage, progress, device } = d; if (d.model) stepModel = d.model; markStep(stage === 'separate' ? 'separate' : 'model', song); show(
-          stage === 'download' ? L(`第 1 步：下载人声分离模型（约 126 MB，只下载这一次）… ${pct(progress)}`, `Step 1: downloading the vocal-separation model (about 126 MB, this once only)… ${pct(progress)}`)
+          stage === 'download' ? L(`第 1 步：下载人声分离模型（约 ${sepModel() === 'umx' ? 18 : 126} MB，只下载这一次）… ${pct(progress)}`, `Step 1: downloading the vocal-separation model (about ${sepModel() === 'umx' ? 18 : 126} MB, this once only)… ${pct(progress)}`)
             : stage === 'load' ? L('第 1 步：载入人声分离模型…', 'Step 1: loading the vocal-separation model…')
             : L(`第 2 步：把原唱的人声和伴奏分开（${device === 'webgpu' ? 'GPU' : 'CPU，较慢'}）… ${pct(progress)}`, `Step 2: separating the original’s vocal from the band (${device === 'webgpu' ? 'GPU' : 'CPU, slower'})… ${pct(progress)}`),
           stage === 'load' ? 1 : progress); },

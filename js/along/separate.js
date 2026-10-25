@@ -8,7 +8,20 @@ import { dlog } from '../dlog.js';
 
 let worker = null, pending = null;
 
-export async function separateVocals(x, { onProgress, cpu = false, variant = '' } = {}) {
+// Which model the worker will pick (it decides; the page needs to know before,
+// to choose the playback rate for recording): Demucs with WebGPU outside
+// WebKit, else Open-Unmix on the CPU — which loses more on sped-up sound
+// (synthetic song: 78 % of melody moments right at 1×, 60 % at 1.5×)
+// (localStorage 'vocalassistant.sep' = 'umx' | 'demucs' picks one: for testing)
+export function sepModel() {
+  let forced = null;
+  try { forced = localStorage.getItem('vocalassistant.sep'); } catch { /* private mode */ }
+  if (forced === 'umx' || forced === 'demucs') return forced;
+  const ua = navigator.userAgent, webkit = /AppleWebKit/.test(ua) && !/Chrome\/|Chromium\/|Edg\//.test(ua);
+  return navigator.gpu && !webkit ? 'demucs' : 'umx';
+}
+
+export async function separateVocals(x, { onProgress, cpu = false, variant = sepModel() === 'umx' ? 'umx' : '' } = {}) {
   await releaseSeparator(); // one song at a time: a newer one replaces the older
   return new Promise((resolve, reject) => {
     pending = reject;

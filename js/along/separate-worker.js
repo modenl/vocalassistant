@@ -1,6 +1,8 @@
 // The lead vocal out of a song: Demucs v4 (Hybrid Transformer Demucs, Rouard,
 // Massa & Défossez 2023; Meta, MIT), Meta's published htdemucs weights, no
-// training, run by onnxruntime-web (MIT). Two exports of the same model:
+// training, run by onnxruntime-web (MIT). Without a usable WebGPU (iPhones:
+// onnxruntime-web's WebGPU closed the page), Open-Unmix UMX-HQ on the CPU
+// instead (below). Two exports of Demucs:
 //  • with WebGPU: monteslu/htdemucs-web-onnx (MIT) — fp16 except the
 //    convolutions, 126 MB, cut into 21 pieces run one after another. Each
 //    piece is downloaded, made a session and its bytes dropped, so the page
@@ -17,6 +19,12 @@ const DEMUCS = 'https://cdn.jsdelivr.net/npm/demucs-web@1.0.2/src/index.js';
 const SPLIT = 'https://huggingface.co/monteslu/htdemucs-web-onnx/resolve/a4a57cc0cf707e5b9a3e6ad3c2c4b21fcbe608c1/';
 const SPLIT_BYTES = 125886563;
 const FULL = 'https://huggingface.co/timcsy/demucs-web-onnx/resolve/92e33df61cfc9eb820272aaa62d2ef6dcf4d950d/htdemucs_embedded.onnx';
+// Open-Unmix UMX-HQ, vocals (Stöter et al. 2019; MIT weights, Zenodo 3370489),
+// the ONNX export edgetools/umx-hq (MIT): 17 MB, a magnitude spectrogram in,
+// the vocal's magnitudes out — light enough for the CPU (16 s of audio in
+// 0.3 s on a Mac, one thread), so no WebGPU is needed
+const UMX = 'https://huggingface.co/edgetools/umx-hq/resolve/87f26a5b2ed19488b5e453059a0a1d530423fe4a/vocals.onnx';
+const UMX_BYTES = 17820856;
 const FULL_BYTES = 180534758, CACHE = 'vocallab-models-v1';
 // piece 0's input normalisation gives NaN in fp16 on WebGPU: kept on the CPU (the export's own note)
 const CPU_NODES = ['/ReduceMean', '/Sub', '/Pow', '/ReduceMean_1', '/Clip', '/Sqrt', '/Add', '/Div',
@@ -72,6 +80,14 @@ async function loadSplit(gpuIO = true) {
   return { split: true, gpuIO, pieces, last, out: manifest.outputs };
 }
 
+async function loadUmx() {
+  let got = 0;
+  const bytes = await fetchBytes(UMX, (n) => { got += n; say({ stage: 'download', progress: Math.min(1, got / UMX_BYTES), bytes: got, total: UMX_BYTES }); });
+  say({ stage: 'load', progress: 0 });
+  const session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'] });
+  return { umx: true, session };
+}
+
 async function loadFull(ep = 'wasm') {
   let got = 0;
   const bytes = await fetchBytes(FULL, (n) => { got += n; say({ stage: 'download', progress: Math.min(1, got / FULL_BYTES), bytes: got, total: FULL_BYTES }); });
@@ -80,9 +96,9 @@ async function loadFull(ep = 'wasm') {
   return { split: false, session };
 }
 
-// WebKit (every iPhone browser, Safari on a Mac): its WebGPU closed the page
-// while the model's pieces were being set up (an iPhone with iOS 27: the
-// second of 21 pieces, 17 MB in — not memory), so there the CPU runs it
+// WebKit (every iPhone browser, Safari on a Mac): onnxruntime-web's WebGPU
+// closed the page on an iPhone (iOS 27) at the first run of the model, fp16 or
+// fp32 alike; there the CPU runs Open-Unmix
 const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\/|Edg\//.test(navigator.userAgent);
 
 // variant (tools/sep-test.html, to find what WebKit's WebGPU can run):
@@ -101,19 +117,21 @@ async function load(forceCpu = false, variant = '') {
   } catch (err) { wlog('adapter-error', { msg: String(err?.message || err) }); }
   if (variant) {
     wlog('variant', { variant });
-    if (variant === 'split-gpu' || variant === 'split-gpu-cpuio') { model = await loadSplit(variant === 'split-gpu'); device = 'webgpu'; }
+    if (variant === 'umx') { model = await loadUmx(); device = 'wasm'; }
+    else if (variant === 'split-gpu' || variant === 'split-gpu-cpuio') { model = await loadSplit(variant === 'split-gpu'); device = 'webgpu'; }
     else { model = await loadFull(variant === 'full-gpu' ? 'webgpu' : 'wasm'); device = variant === 'full-gpu' ? 'webgpu' : 'wasm'; }
     wlog('model-ready', { variant });
     return model;
   }
   if (gpu && (WEBKIT || forceCpu)) { wlog('gpu-skipped', { webkit: WEBKIT, forced: forceCpu }); gpu = false; }
   wlog('ort-ready', { gpu, threads: ort.env.wasm.numThreads });
-  say({ stage: 'load', progress: 0, device: gpu ? 'webgpu' : 'wasm', model: gpu ? 'split-fp16' : 'full-fp32' });
+  say({ stage: 'load', progress: 0, device: gpu ? 'webgpu' : 'wasm', model: gpu ? 'split-fp16' : 'umx-hq' });
   const errs = [];
   if (gpu) {
     try { model = await loadSplit(); device = 'webgpu'; wlog('model-ready', { model: 'split-fp16' }); return model; } catch (err) { errs.push(`webgpu: ${err?.message || err}`); wlog('split-error', { msg: String(err?.message || err).slice(0, 300) }); }
   }
-  try { model = await loadFull(); device = 'wasm'; wlog('model-ready', { model: 'full-fp32' }); return model; } catch (err) { errs.push(`wasm: ${err?.message || err}`); wlog('full-error', { msg: String(err?.message || err).slice(0, 300) }); }
+  // no usable WebGPU: Open-Unmix on the CPU (Demucs there: about 2× slower than the song)
+  try { model = await loadUmx(); device = 'wasm'; wlog('model-ready', { model: 'umx-hq' }); return model; } catch (err) { errs.push(`wasm: ${err?.message || err}`); wlog('umx-error', { msg: String(err?.message || err).slice(0, 300) }); }
   throw new Error(errs.join(' | '));
 }
 
@@ -180,6 +198,50 @@ async function separate(x) {
   return { vocals: out, gpu: tGpu / 1000, cpu: tCpu / 1000 };
 }
 
+// Open-Unmix: the mixture's STFT (4096 / 1024, Hann, centred), its magnitudes
+// through the network, their ratio to the mixture's as a mask (0–1) on the
+// complex spectrum, back to sound. In 30 s stretches overlapping by a quarter
+// (the whole song's spectrum at once would be 160 MB for 4 minutes),
+// cross-faded like the Demucs segments.
+async function separateUmx(x) {
+  const { stft, istft, reflectPad } = await import(DEMUCS);
+  const NF = 4096, H = 1024, NB = NF / 2 + 1, SEG = 30 * 44100, stride = Math.floor(SEG * 0.75), n = x.length;
+  const s = model.session, out = new Float32Array(n), wsum = new Float32Array(n);
+  const segs = Math.max(1, Math.ceil(Math.max(0, n - SEG) / stride) + 1);
+  let k = 0, tRun = 0;
+  for (let start = 0; start < n; start += stride) {
+    const len = Math.min(SEG, n - start), seg = x.subarray(start, start + len);
+    const S = stft(reflectPad(seg, NF / 2, NF / 2), NF, H), F = S.numFrames;
+    // demucs-web's STFT is scaled by 1 / √N; the network wants it unscaled
+    const mag = new Float32Array(2 * NB * F), sc = Math.sqrt(NF);
+    for (let f = 0; f < F; f++) for (let b = 0; b < NB; b++) {
+      const i = f * NB + b, m = Math.hypot(S.real[i], S.imag[i]) * sc;
+      mag[b * F + f] = m; mag[NB * F + b * F + f] = m; // the same sound on both channels
+    }
+    wlog('segment-start', { k, of: segs });
+    const t0 = performance.now(), r = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', mag, [1, 2, NB, F]) });
+    tRun += performance.now() - t0;
+    const est = r[s.outputNames[0]].data;
+    for (let f = 0; f < F; f++) for (let b = 0; b < NB; b++) {
+      const i = f * NB + b, m = mag[b * F + f], g = m > 1e-9 ? Math.min(1, Math.max(0, est[b * F + f] / m)) : 0;
+      S.real[i] *= g; S.imag[i] *= g;
+    }
+    r[s.outputNames[0]].dispose?.();
+    const v = istft(S.real, S.imag, F, NB, NF, H, len + NF).subarray(NF / 2, NF / 2 + len);
+    for (let i = 0; i < len; i++) {
+      const w = segs === 1 ? 1 : Math.min(Math.min((i + 1) / (stride * 0.5), 1), Math.min((len - i) / (stride * 0.5), 1));
+      out[start + i] += v[i] * w; wsum[start + i] += w;
+    }
+    const BIN = 441, nb = Math.ceil(len / BIN), ve = new Float32Array(nb), be = new Float32Array(nb);
+    for (let i = 0; i < len; i++) { const j = (i / BIN) | 0, a = Math.abs(v[i]), b = Math.abs(seg[i] - v[i]); if (a > ve[j]) ve[j] = a; if (b > be[j]) be[j] = b; }
+    wlog('segment-done', { k, ms: Math.round(performance.now() - t0) });
+    self.postMessage({ stage: 'separate', progress: ++k / segs, device, part: { start, ve, be, bin: BIN } }, [ve.buffer, be.buffer]);
+    if (start + len >= n) break;
+  }
+  for (let i = 0; i < n; i++) if (wsum[i] > 0) out[i] /= wsum[i];
+  return { vocals: out, gpu: tRun / 1000, cpu: 0 };
+}
+
 // every session's GPU buffers freed before the worker ends — a terminated
 // worker's weren't, and every later separation ran slower (16 s of audio:
 // 27, 50, 82 s in three runs one after another)
@@ -195,7 +257,7 @@ self.onmessage = async (e) => {
   try {
     say({ stage: 'load', progress: 0 });
     await load(!!e.data.cpu, e.data.variant || '');
-    const t0 = performance.now(), r = await separate(e.data.x);
-    self.postMessage({ ...r, device, model: model.split ? 'split-fp16' : 'full-fp32', secs: (performance.now() - t0) / 1000 }, [r.vocals.buffer]);
+    const t0 = performance.now(), r = model.umx ? await separateUmx(e.data.x) : await separate(e.data.x);
+    self.postMessage({ ...r, device, model: model.umx ? 'umx-hq' : model.split ? 'split-fp16' : 'full-fp32', secs: (performance.now() - t0) / 1000 }, [r.vocals.buffer]);
   } catch (err) { wlog('error', { msg: String(err?.message || err).slice(0, 300) }); say({ error: String(err?.message || err) }); }
 };

@@ -19,6 +19,10 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header('Cache-Control', 'no-store')
+        # ISOLATE=1: cross-origin isolated (SharedArrayBuffer: WebAssembly threads)
+        if os.environ.get('ISOLATE'):
+            self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
+            self.send_header('Cross-Origin-Embedder-Policy', 'require-corp')
         super().end_headers()
 
 
