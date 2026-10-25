@@ -80,10 +80,10 @@ export function drawAlong(canvas, { range, win, ref = [], user = [], mine = [], 
 // the envelope, the ring in the 2–4 kHz band. Dashed links join the first
 // coinciding harmonics (an octave apart: every 2nd harmonic of the lower
 // voice). `say`, `say2`: two lines on top (the pitch, then the ring).
-export function drawSpectraPair(canvas, { ref = null, user = null, say = '', say2 = '', fmax = 4000 } = {}) {
+export function drawSpectraPair(canvas, { ref = null, user = null, say = '', say2 = '', fmax = 4000, refLabel = L('原唱', 'Original') } = {}) {
   const { ctx, w, h } = fit(canvas);
   ctx.clearRect(0, 0, w, h);
-  const x0 = 44, x1 = w - 10, top = 42, laneH = (h - top - 20) / 2;
+  const x0 = 58, x1 = w - 10, top = 42, laneH = (h - top - 20) / 2;
   const X = (f) => x0 + (Math.min(fmax, f) / fmax) * (x1 - x0);
   // the words on top: two lines, each cut to the width
   const fitText = (t) => { let s = t; while (s && ctx.measureText(s).width > x1 - x0) s = s.slice(0, -2) + '…'; return s; };
@@ -92,7 +92,7 @@ export function drawSpectraPair(canvas, { ref = null, user = null, say = '', say
   ctx.fillText(fitText(say || L('唱起来、或在上面的音高图上点一下，就显示那一刻的频谱', 'Sing, or click the pitch chart above, to see the spectra at that moment')), x0, 3);
   if (say2) { ctx.font = '12px -apple-system, "PingFang SC", sans-serif'; ctx.fillStyle = THEME.text2; ctx.fillText(fitText(say2), x0, 20); }
   drawFreqGrid(ctx, { x0, x1, y0: top, y1: top + 2 * laneH }, fmax);
-  drawVoiceLane(ctx, { x0, x1, y0: top, y1: top + laneH }, ref, { color: ALONG_COLORS.ref, label: L('原唱', 'Original'), fmax });
+  drawVoiceLane(ctx, { x0, x1, y0: top, y1: top + laneH }, ref, { color: ALONG_COLORS.ref, label: refLabel, fmax });
   drawVoiceLane(ctx, { x0, x1, y0: top + laneH, y1: top + 2 * laneH }, user, { color: ALONG_COLORS.mine, label: L('你', 'You'), fmax });
   // links where the first harmonics of the two coincide (within 3 %)
   if (ref?.harm?.length && user?.harm?.length) {

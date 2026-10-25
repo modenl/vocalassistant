@@ -394,6 +394,8 @@ ol.refs a:hover { text-decoration: underline; }
 .al-now { display: flex; gap: 14px; align-items: center; min-width: 300px; min-height: 44px; justify-content: flex-end; }
 .al-nowbox { display: flex; gap: 6px; align-items: center; }
 .al-nowbox > b { font-size: 22px; font-family: var(--mono); min-width: 48px; }
+.al-sep { font-size: 12px; color: var(--text-2); margin: 4px 0 0; height: 1.5em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.al-sep.ok { color: #6fdc6f; } .al-sep.warn { color: #f0b429; }
 .al-tip { font-size: 13px; color: var(--text-2); margin: 6px 0 10px; min-height: 2.9em; line-height: 1.45; }
 .al-tip.warn { color: var(--text-2); }
 .al-scroll { overflow-x: auto; overflow-y: hidden; }

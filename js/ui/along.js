@@ -11,6 +11,7 @@ import { AudioEngine } from '../audio/engine.js';
 import { FrameAnalyzer } from '../dsp/analyzer.js';
 import { PitchTracker } from '../analysis/pitch.js';
 import { decodeSong, extractMelody, resampleTo44k } from '../along/melody.js';
+import { separateVocals } from '../along/separate.js';
 import { videoIdOf, createPlayer, bilibiliEmbedOf } from '../along/youtube.js';
 import { captureTabAudio, canCaptureTab } from '../along/tabcapture.js';
 import { VOICE_TYPES, midiName } from '../config.js';
@@ -59,6 +60,7 @@ export class AlongView {
         <span class="status al-status" id="alStatus">${L('支持 mp3、m4a、wav 等歌曲文件。', 'mp3, m4a, wav and other song files.')}</span>
         <div class="al-now" id="alNow"></div>
       </div>
+      <p class="al-sep" id="alSep"></p>
       <p class="al-tip" id="alTip">🎧 ${L('请戴耳机：原唱只从耳机里放，麦克风就只录到你。用音箱外放时，麦克风会同时录到原唱，结果不准。', 'Wear headphones: the original plays only in them, so the microphone hears only you. Played through speakers, the microphone records the original too and the result isn’t reliable.')}</p>
       <div class="panel">
         <div class="al-scroll" id="alScroll"><canvas class="viz" id="alView" style="height:320px"></canvas></div>
@@ -70,7 +72,7 @@ export class AlongView {
           <span><b style="color:${ALONG_COLORS.mine}">A3</b> ${L('橙字 = 你唱的音名', 'orange = the note you sang')}</span>
           <span><i style="background:rgba(154,163,181,0.45)"></i>${L('灰色 = 你没唱的地方，当作伴奏，不计分', 'grey = where you didn’t sing: taken as accompaniment, not scored')}</span>
         </div>
-        <p class="muted al-cap" id="alCap">${L('原唱的旋律用 MELODIA 算法从歌曲里提取（Essentia.js）：前奏、间奏里的乐器旋律也可能被画出来，那几段不用跟。', 'The original’s melody is extracted from the song with the MELODIA algorithm (Essentia.js): instrumental intros and solos may show up too — no need to sing those.')}</p>
+        <p class="muted al-cap" id="alCap">${L('原唱的旋律：先用 Demucs 把人声从伴奏里分出来，再用 MELODIA 算法提取（Essentia.js）；分好之前先按混音提取，前奏、间奏里的乐器旋律可能被画出来，那几段不用跟。', 'The original’s melody: Demucs first separates the vocal from the band, then the MELODIA algorithm extracts it (Essentia.js); until that’s done the mix is used, and instrumental intros and solos may show up — no need to sing those.')}</p>
         <h4 class="ls-h">${L('频谱对照：同一时刻的原唱和你', 'Spectra: the original and you at the same moment')}</h4>
         <canvas class="viz" id="alSpec" style="height:270px"></canvas>
         <div id="alCards"></div>
@@ -162,6 +164,7 @@ export class AlongView {
       this.user = []; this.result = null;
       $('alStatus').textContent = L(`“${file.name}”：${fmtT(mel.secs)}，找到 ${mel.notes.length} 个旋律音（${((performance.now() - t) / 1000).toFixed(1)} 秒）。戴上耳机，点“开始跟唱”。`, `“${file.name}”: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes found (${((performance.now() - t) / 1000).toFixed(1)} s). Put on headphones and press “Sing along”.`);
       $('alGo').disabled = false;
+      this.separateSong(this.song, x, 0);
     } catch (err) {
       $('alStatus').textContent = L(`读不了这个文件：${err.message}`, `Can’t read this file: ${err.message}`);
     }
@@ -334,10 +337,39 @@ export class AlongView {
     T.chunks = [];
     this.song.tabAudio = { x, sr: T.sr, offset: T.offset }; // in memory only, for the spectra; never stored
     try {
-      const m = await extractMelody(await resampleTo44k(x, T.sr), this.app.settings.a4);
+      const x44 = await resampleTo44k(x, T.sr), m = await extractMelody(x44, this.app.settings.a4);
       const frames = m.frames.map((f) => ({ t: f.t + T.offset, midi: f.midi }));
       this.song.mel = { frames, notes: notesOf(frames), secs: x.length / T.sr };
+      this.separateSong(this.song, x44, T.offset);
     } catch { /* keep the rolling result */ }
+  }
+
+  // Demucs in the background (along/separate.js): the lead vocal out of the
+  // song, then the original's melody again from the vocal alone — with the
+  // band in the mix MELODIA follows chords and bass much of the time (a
+  // synthetic song: 22 of 176 moments right on the mix, 160 on the vocal).
+  // The spectra then show the vocal too. Until it's done, all of it works on
+  // the mix. offset: song time of x[0]. Nothing is stored or sent anywhere.
+  async separateSong(song, x, offset = 0) {
+    const el = this.root.querySelector('#alSep'), show = (t, cls = '') => { if (this.song === song && el) { el.textContent = t; el.className = `al-sep ${cls}`; } };
+    show(L('准备分离人声（Demucs）…', 'Getting ready to separate the vocal (Demucs)…'));
+    try {
+      const r = await separateVocals(x, {
+        onProgress: ({ stage, progress, device }) => show(stage === 'download' ? L(`下载人声分离模型（Demucs，约 180 MB，只下载一次）… ${Math.round(progress * 100)}%`, `Downloading the vocal-separation model (Demucs, about 180 MB, once only)… ${Math.round(progress * 100)}%`)
+          : stage === 'load' ? L('载入人声分离模型…', 'Loading the vocal-separation model…')
+          : L(`正在把原唱的人声和伴奏分开（Demucs，${device === 'webgpu' ? 'GPU' : 'CPU，较慢'}）… ${Math.round(progress * 100)}%　分好之前按混音分析`, `Separating the original’s vocal from the band (Demucs, ${device === 'webgpu' ? 'GPU' : 'CPU, slower'})… ${Math.round(progress * 100)}% — until then the mix is analysed`)),
+      });
+      if (this.song !== song) return;
+      const m = await extractMelody(r.vocals, this.app.settings.a4);
+      if (this.song !== song) return;
+      song.vox = { x: r.vocals, sr: 44100, offset };
+      if (m.notes.length >= 3) { const frames = m.frames.map((f) => ({ t: f.t + offset, midi: f.midi })); song.mel = { frames, notes: notesOf(frames), secs: Math.max(song.mel.secs, offset + m.secs) }; }
+      show(L(`✓ 已把人声分出来（Demucs，${r.device === 'webgpu' ? 'GPU' : 'CPU'}，${r.secs.toFixed(0)} 秒）：原唱的旋律和频谱都只看人声，伴奏不再干扰`, `✓ Vocal separated (Demucs, ${r.device === 'webgpu' ? 'GPU' : 'CPU'}, ${r.secs.toFixed(0)} s): the original’s melody and spectra now use the vocal alone, free of the band`), 'ok');
+      if (this.result && !this.eng) this.finish(); else if (!this.eng) this.draw(this.reviewT ?? 0);
+      if (this.reviewT != null) this.drawSpectra(this.reviewT);
+    } catch (err) {
+      show(L(`人声分离没成功（${err.message}），原唱按混音分析`, `Vocal separation failed (${err.message}); the original is analysed from the mix`), 'warn');
+    }
   }
 
   // the delay lined up, every note compared, the whole song drawn
@@ -382,7 +414,9 @@ export class AlongView {
     const N = 4096, song = this.song;
     // the original: the song file, or the shared tab's sound (kept, or still coming in)
     let rx = null, rsr = 44100;
-    if (song.x) { rx = song.x.subarray(Math.max(0, Math.round(t * song.sr - N / 2)), Math.round(t * song.sr + N / 2)); rsr = song.sr; }
+    const V = song.vox, vc = V ? (t - V.offset) * V.sr : -1;
+    if (V && vc - N / 2 >= 0 && vc + N / 2 <= V.x.length) rx = V.x.subarray(Math.round(vc - N / 2), Math.round(vc - N / 2) + N);
+    else if (song.x) { rx = song.x.subarray(Math.max(0, Math.round(t * song.sr - N / 2)), Math.round(t * song.sr + N / 2)); rsr = song.sr; }
     else if (song.tabAudio) { const A = song.tabAudio, c = (t - A.offset) * A.sr; rsr = A.sr; rx = A.x.subarray(Math.max(0, Math.round(c - N / 2)), Math.round(c + N / 2)); }
     else if (this.tab?.offset != null) { rsr = this.tab.sr; rx = AlongView.windowOf(this.tab.chunks, (t - this.tab.offset) * rsr, N); }
     // the singer: the microphone at the matching moment (the delay lined up)
@@ -400,7 +434,7 @@ export class AlongView {
     const refS = rx && rx.length === N ? voiceSide(rx, rsr, N / 2, rF0, { N, mixed: true }) : null, user = ux ? voiceSide(ux, M.sr, N / 2, uF0, { N }) : null;
     this.cards?.update({ ref: refS?.f0 ? refS : null, user: user?.f0 ? user : null });
     const lateTxt = late > 0.3 ? L(`（原唱的旋律要晚一点才算得出来：这是 ${late.toFixed(1)} 秒前）`, ` (the original’s melody is worked out a little late: this is ${late.toFixed(1)} s ago)`) : '';
-    drawSpectraPair(cv, { ref: refS, user, say: this.relationText(rel, rF0, uF0, t) + lateTxt, say2: this.ringText(refS, user) });
+    drawSpectraPair(cv, { refLabel: V && rx && rx.buffer === V.x.buffer ? L('原唱人声', 'Orig. vocal') : L('原唱', 'Original'), ref: refS, user, say: this.relationText(rel, rF0, uF0, t) + lateTxt, say2: this.ringText(refS, user) });
   }
 
   // the ring (2–4 kHz below the lows) and the vowel, original against singer
