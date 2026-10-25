@@ -320,6 +320,22 @@ svg.tract .tv-labels .tl-name { font-weight: 700; }
 svg.tract .tv-labels .tl-val { fill: #a9b0bf; font-size: 10px; }
 svg.tract .tl-lead { stroke: #6e7689; stroke-width: 0.8; stroke-dasharray: 2 2; }
 svg.tract .tv-callout { font-size: 11px; font-weight: 800; fill: #fff; }
+svg.tract.mini { height: 150px; max-height: none; }
+svg.tract.mini .tv-labels, svg.tract.mini #tvCallouts { display: none; }
+/* twang lesson: the moment's spectrum beside the mini tract */
+.ls-mini { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(150px, 1fr); gap: 10px; align-items: end; }
+.ls-mini .vc-row { margin-top: 0; }
+@media (max-width: 640px) { .ls-mini { grid-template-columns: 1fr; } }
+/* small voice-scope pieces reused on other pages (ui/voiceCards.js): fixed sizes */
+.vc-row { display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 8px; }
+.vc-row:not(:has(.vc-wide)) { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+@media (max-width: 640px) { .vc-row { grid-template-columns: 1fr 1fr; } .vc-row .vc-wide { grid-column: 1 / -1; } }
+.vc-card { background: var(--surface-2); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+.vc-card h5 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vc-card h5 i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.vc-vowel { height: 190px; }
+.vc-words { margin: 2px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--text-2); height: 2.9em; overflow: hidden; }
+.vc-words b { color: var(--text); font-weight: 600; }
 a.ref { font-size: 11px; vertical-align: super; text-decoration: none; margin-left: 1px; color: #8fb8f0; }
 .refs-box { margin-top: 12px; }
 .refs-box summary { cursor: pointer; font-weight: 600; font-size: 13px; }

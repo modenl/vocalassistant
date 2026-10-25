@@ -6,7 +6,7 @@ import { VOICE_TYPES, hzToMidi, midiName } from '../config.js';
 import { AudioEngine } from '../audio/engine.js';
 import { FrameAnalyzer } from '../dsp/analyzer.js';
 import { VoiceState } from '../analysis/voiceState.js';
-import { drawWave, drawSpectrum, Spectrogram, TractView, drawCompare, pool, SpecAvg, sprOf } from '../viz/scope.js';
+import { drawWave, Spectrogram, TractView, drawCompare, pool, SpecAvg, sprOf } from '../viz/scope.js';
 import { ref, refsSection } from '../refs.js';
 import { glossaryHtml } from './glossary.js';
 import { pitchNowHtml } from './pitchNow.js';
@@ -14,6 +14,8 @@ import { drawVowelChart, drawFormantRows, rowColor } from '../viz/formants.js';
 import { REF_VOWELS, vowelOf, fmMedians, formantTrust } from '../analysis/vowels.js';
 import { twangVerdict, buildCurve, curveSpan, okCurve, levelOf } from '../analysis/twang.js';
 import { loadTwang } from '../lessons/lessons.js';
+import { drawVoiceSpectrum } from '../viz/voiceSpec.js';
+import { harmonicsOf } from '../along/spectra.js';
 import { L } from '../i18n.js';
 
 const BASE_KEY = 'vocalassistant.scope.base.v1';
@@ -58,7 +60,7 @@ export class ScopeView {
       <div class="scope-main">
         <div class="panel">
           <div class="sc-readout" id="scReadout"></div>
-          <canvas class="viz" id="scCompare" style="height:290px"></canvas>
+          <canvas class="viz" id="scCompare" style="height:250px"></canvas>
         </div>
         <div class="panel">
           <div class="ph"><h3>${L('声道示意（根据声音推测）', 'Vocal tract (estimated from the sound)')}</h3></div>
@@ -71,7 +73,7 @@ export class ScopeView {
           <div class="ph-right fm-actions"><button class="btn" id="scPin">${L('📌 记下这个音', '📌 Keep this sound')}</button><button class="btn" id="scPinClear">${L('清空', 'Clear')}</button>
             <label class="muted"><input type="checkbox" id="scRefs" checked> ${L('参考元音', 'Reference vowels')}</label></div></div>
         <div class="fm-grid">
-          <div><canvas class="viz" id="scVowel" style="height:270px"></canvas></div>
+          <div><canvas class="viz" id="scVowel" style="height:240px"></canvas></div>
           <div><canvas class="viz" id="scRows" style="height:200px"></canvas></div>
         </div>
         <p class="muted" style="font-size:12px;margin:6px 0 0">${L('F1–F5 不是音高：音高是基频 F0（声带振动快慢），F1–F5 是口腔喉咙把声音放大的几个位置，由舌头、嘴型、喉咙形状决定，和唱多高基本无关。', 'F1–F5 are not the pitch: pitch is the fundamental F0 (how fast the vocal folds vibrate); F1–F5 are where the mouth and throat boost the sound, set by the tongue, lips and throat, and hardly depend on the note. ')}${L('怎么看：左图是元音图——横轴 F2（越往左舌头越靠前），纵轴 F1（越往上舌头越高、嘴张得越小），灰圈是标准元音的位置，绿点和它的轨迹是你现在的声音。右图每一行是一个发音，F1–F5 各一个点；彩色粗线是 F3 到 F5 的跨度，研究里那位歌手用咽音时它变短（F3、F5 降低）。唱一个音、按“记下这个音”，再换一个发音，就能并排比较。实心点 = 测得准（音高 ≤ 300 Hz），空心点 = 粗略估计（300–450 Hz），更高的音测不准，不显示。参考元音来自美式英语（Peterson & Barney 1952），只有 F1–F3。', 'How to read it: left is the vowel chart — F2 across (further left = tongue further forward), F1 down (higher up = tongue higher, mouth more closed); grey circles are standard vowels, the green dot and its trail are your voice now. On the right each row is one sound with F1–F5; the thick coloured line spans F3 to F5 — in the singer studied, twang shortened it (F3 and F5 fell). Sing, press “Keep this sound”, change the sound and compare side by side. Filled = reliable (pitch ≤ 300 Hz), hollow = rough (300–450 Hz); higher notes can’t be measured and aren’t shown. Reference vowels are American English (Peterson & Barney 1952), F1–F3 only.')}</p>
@@ -83,7 +85,7 @@ export class ScopeView {
           <button data-v="gram" class="${view === 'gram' ? 'on' : ''}">${L('声谱图', 'Spectrogram')}</button>
           <span class="sub" id="scViewSub"></span>
         </div>
-        <canvas class="viz" id="scDetail" style="height:200px"></canvas>
+        <canvas class="viz" id="scDetail" style="height:180px"></canvas>
       </div>
       <details class="panel refs-box"><summary>${L('详细读数', 'Detailed readings')}</summary><div id="scNums" class="sc-nums"></div></details>
       ${glossaryHtml(['ring', 'ratio', 'peaks', 'spectrum', 'formant', 'db', 'twang', 'frequency'])}
@@ -262,7 +264,12 @@ export class ScopeView {
     // detail view
     const view = this.view || 'wave', sub = $('scViewSub');
     if (view === 'wave') { drawWave($('scDetail'), c?.x, c?.sr, voiced ? f.f0 : 0); sub.textContent = L('声带每开合一次就是一个周期，越规整越稳', 'one cycle per opening and closing of the vocal folds; the more regular, the steadier'); }
-    else if (view === 'spec') { drawSpectrum($('scDetail'), c ? { spec: c.spec, binHz: f.binHz, f0: voiced ? f.f0 : 0, env: voiced ? f.env : null, formants: voiced ? f.formants : [], spr: st?.spr } : null); sub.textContent = L('黄点 = 谐波；绿线 = 共振峰包络（F1–F3）', 'yellow dots = harmonics; green line = formant envelope (F1–F3)'); }
+    else if (view === 'spec') {
+      // the same compact spectrum as the sing-along and the twang lesson
+      const spec = c ? { db: c.spec, binHz: f.binHz } : null, f0 = voiced ? f.f0 : 0;
+      drawVoiceSpectrum($('scDetail'), spec && { spec, f0, harm: harmonicsOf(spec, f0, 5000), formants: voiced ? (f.formants || []).map((q) => q.f) : [], ring: singing ? st.spr : NaN, name: f0 ? midiName(Math.round(hzToMidi(f0, this.app.settings.a4))) : '' }, { fmax: 5000 });
+      sub.textContent = L('粗线 F0 = 音高；连着谐波的线 = 包络；紫线 F1、F2 = 元音；蓝色区 2–4 kHz = 共鸣', 'thick line F0 = the pitch; the line through the harmonics = the envelope; purple F1, F2 = the vowel; blue 2–4 kHz = the ring');
+    }
     else { this.gram.draw(this.hop || 0.021); sub.textContent = L('横轴时间、纵轴频率，越亮越强；白线是音高', 'time across, frequency up, brighter = stronger; the white line is pitch'); }
     const rows = singing ? [
       [L('穿透力（2–4 kHz）', 'Ring (2–4 kHz)'), `${Math.round(st.spr)} dB`, L('2–4 kHz 比低频弱多少；越小越亮，歌剧演员 11–30', '2–4 kHz below the lows; smaller = brighter, opera singers 11–30')],

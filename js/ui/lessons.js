@@ -13,6 +13,9 @@ import { glossaryHtml } from './glossary.js';
 import { pitchNowHtml } from './pitchNow.js';
 import { drawFormantRows } from '../viz/formants.js';
 import { vowelOf, recentFm, formantTrust } from '../analysis/vowels.js';
+import { drawVoiceSpectrum } from '../viz/voiceSpec.js';
+import { harmonicsOf, ringOf, envelopeFormants } from '../along/spectra.js';
+import { VoiceCards } from './voiceCards.js';
 
 const SPAN = 10;
 const LEVEL_NAMES = () => ({ easy: tr('入门', 'Beginner'), std: tr('标准', 'Standard'), strict: tr('严格', 'Strict') });
@@ -135,9 +138,13 @@ export class LessonsView {
             <div><h4 class="ls-h">${tr('声带闭合', 'Vocal-fold closure')} ${ref('hanson1997')}</h4><canvas class="viz" id="lsClos" style="height:210px"></canvas></div>
           </div>
           ${cap('左图：往上走是更亮，往右走只是更响——要往上，不要往右。右图：根据声音推测声带闭得怎么样（看不到声带）。绿色 = 闭合好；黄色 = 漏气（周期性降低、第一谐波变强）；红色 = 挤（闭得紧但振动不规则）。咽音本来就闭得紧一点，点在绿色区偏左是正常的。', 'Left: up is brighter, right is just louder — go up, not right. Right: the closure of the vocal folds, inferred from the sound (they can’t be seen). Green = closing well; yellow = air leaking (less periodic, a stronger first harmonic); red = squeezed (tight but irregular). Twang closes a bit more firmly, so a dot left in the green is normal.')}`}
-          <h4 class="ls-h">${tr('频谱', 'Spectrum')}</h4>
+          <h4 class="ls-h">${tr('频谱：你现在 vs 基准（平均）', 'Spectrum: you now vs the reference (average)')}</h4>
           <canvas class="viz" id="lsSpec" style="height:220px"></canvas>
           ${cap('两条线都按左边低频的最高点对齐，所以比的是 2–4 kHz（蓝色区域）占多少，不是音量。咽音会让绿线在蓝色区域里明显高出灰线（灰线是基准的平均频谱，音高不同时只作参考）。', 'Both curves are aligned at their highest point on the left, so this compares how much 2–4 kHz (blue area) there is, not loudness. Twang lifts the green curve clearly above the grey one in the blue area (grey = the reference’s average spectrum; at another pitch, a guide only).')}
+          <div class="ls-mini">
+            <div><h4 class="ls-h">${tr('这一刻的频谱：F0、F1、F2 和共鸣', 'This moment: F0, F1, F2 and the ring')}</h4><canvas class="viz" id="lsVoice" style="height:190px"></canvas></div>
+            <div id="lsCards"></div>
+          </div>
           <div class="ph" style="margin-top:6px"><h4 class="ls-h">${tr('共振峰 F1–F5（元音和咽音的“指纹”）', 'Formants F1–F5 (the vowel’s and twang’s “fingerprint”)')} ${ref('petersonBarney1952', 'sundbergThalen2010')}</h4><span class="sub ls-fmnote" id="lsFmNote"></span></div>
           <canvas class="viz" id="lsFm" style="height:132px"></canvas>
           ${cap('F1–F5 不是音高（音高是 F0），是口腔喉咙的共鸣位置。F1、F2 决定是哪个元音：要和第 1 步差不多，比较才公平。研究里那位歌手用咽音时 F3–F5 靠拢（粗线变短）、F1 和 F2 升高——这里只给你看，不参与判定。音高超过约 450 Hz 测不准，不显示。', 'F1–F5 are not the pitch (that’s F0) but where the mouth and throat resonate. F1 and F2 set the vowel: keep them close to step 1’s for a fair comparison. In the singer studied, twang drew F3–F5 together (the thick line shortens) and raised F1 and F2 — shown for you, not used to judge. Above about 450 Hz they can’t be measured and aren’t shown.')}`;
@@ -173,6 +180,20 @@ export class LessonsView {
       gainLabel: step.compare === 'base' ? tr('比同一音高的普通唱法', 'over the plain voice at this pitch') : '',
     });
     this.drawFm(ctx);
+    this.drawVoice();
+  }
+
+  // the voice at this moment, in the voice scope's small pieces: its spectrum
+  // (F0, F1, F2, the ring) and the vocal tract they suggest (the pharynx
+  // narrows as the ring grows — what twang does)
+  drawVoice() {
+    const cv = this.root.querySelector('#lsVoice'), el = this.root.querySelector('#lsCards');
+    if (!cv || !el) return;
+    if (!this.cards || this.cards.el !== el) this.cards = new VoiceCards(el, [{ key: 'now', label: tr('你现在', 'You now'), title: tr('声道（推测）', 'Vocal tract (estimated)'), color: '#2fbf71' }], { sex: this.P.sex, vowel: false });
+    const r = this.runner, fs = r?.running && r.last?.voiced ? r.frameSpec : null;
+    const side = fs ? (() => { const harm = harmonicsOf(fs, fs.f0, 4000), fm = recentFm(r.take.frames); return { spec: fs, f0: fs.f0, harm, ring: ringOf(harm), formants: fm?.F.slice(0, 2) || envelopeFormants(harm, fs.f0), est: !fm, name: midiName(Math.round(69 + 12 * Math.log2(fs.f0 / 440))) }; })() : null;
+    drawVoiceSpectrum(cv, side, { color: '#2fbf71' });
+    this.cards.update({ now: side });
   }
 
   // F1–F5 rows: step 1 (and step 2 on the pinch step) against the voice now

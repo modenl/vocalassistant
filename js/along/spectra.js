@@ -59,3 +59,45 @@ export function pitchRelation(refF0, userF0) {
   const name = (f) => midiName(Math.round(69 + 12 * Math.log2(f / 440)));
   return { octave, cents, kind: a <= 25 ? 'same' : a <= 50 ? 'near' : 'off', refName: name(refF0), userName: name(userF0) };
 }
+
+// Ring (resonance) from the harmonics alone: the strongest harmonic in 0–2 kHz
+// minus the strongest in 2–4 kHz, dB (the singing power ratio, Omori 1996 —
+// smaller = brighter, more "ring"; good singing ≈ 10–20 dB). Only the voice's
+// own harmonics count, which keeps most of a backing track out of it.
+export function ringOf(harm) {
+  const lo = harm.filter((h) => h.f < 2000), hi = harm.filter((h) => h.f >= 2000 && h.f <= 4000);
+  if (!lo.length || !hi.length) return NaN;
+  return Math.max(...lo.map((h) => h.db)) - Math.max(...hi.map((h) => h.db));
+}
+
+// F1, F2 from the harmonics alone: for the original, where the band is mixed
+// in and an LPC fit of the recording would describe the whole mix. A clean
+// signal is rebuilt from only the melody's harmonics (their measured levels;
+// LPC sees just the power spectrum, so the phases don't matter) and the same
+// LPC as for the singer runs on it. Gated like the singer's (none above 450 Hz).
+export function envelopeFormants(harm, f0) {
+  if (formantTrust(f0) === 'none') return null;
+  const h = harm.filter((x) => x.f > 0 && x.f <= 4500);
+  if (h.length < 4) return null;
+  const sr = 11025, n = 1024, x = new Float32Array(n);
+  for (const p of h) {
+    const a = Math.pow(10, p.db / 20), w = (2 * Math.PI * p.f) / sr, ph = 0.7 * p.k * p.k;
+    for (let i = 0; i < n; i++) x[i] += a * Math.cos(w * i + ph);
+  }
+  const fr = analyzeFormants(x, sr, 12);
+  return fr && fr.formants.length >= 2 ? fr.formants.slice(0, 2).map((q) => q.f) : null;
+}
+
+// Everything one voice's spectrum view shows, from a stretch of audio: the
+// spectrum, F0 with its note, the harmonics, the ring, and F1/F2 — by LPC
+// (a voice alone) or from the harmonics' envelope (`mixed`: a voice in a band,
+// marked as an estimate). Shared by the sing-along, the voice scope and the
+// twang lesson. x: samples; at: the centre sample; N: window length.
+export function voiceSide(x, sr, at, f0, { N = SPEC_N, mixed = false } = {}) {
+  const spec = spectrumAt(x, sr, at, N);
+  if (!spec) return null;
+  const harm = f0 > 0 ? harmonicsOf(spec, f0, 4000) : [];
+  const side = { spec, f0, harm, ring: f0 > 0 ? ringOf(harm) : NaN, name: f0 > 0 ? midiName(Math.round(69 + 12 * Math.log2(f0 / 440))) : '', est: mixed };
+  if (f0 > 0) side.formants = (!mixed && formantsAt(x, sr, at + Math.round(0.02 * sr), f0)) || envelopeFormants(harm, f0);
+  return side;
+}

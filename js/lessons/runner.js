@@ -55,6 +55,8 @@ export class StepRunner {
       const st = this.take.push(feat, t, muted);
       // the voice's recent spectrum (for the spectrum views and the saved references)
       if (!muted && st.voiced) this.spec.push(pool(feat.spec, feat.binHz), this.last ? Math.min(0.1, t - this.last.t) : 0.02);
+      // and the latest voiced frame's, for the compact spectrum (viz/voiceSpec.js)
+      if (!muted && st.voiced && feat.f0 > 0) this.frameSpec = { db: Float32Array.from(feat.spec), binHz: feat.binHz, f0: feat.f0 };
       this.last = st;
       if (muted) this.ev = { ...this.ev, pass: false, level: 'idle', hint: L('正在播放参考音——听完再唱（这段时间不计入）', 'Playing the reference — listen, then sing (this time doesn’t count)') };
       else if (t - this.lastEval >= 0.15) { this.lastEval = t; this.ev = this.check(this.take); }

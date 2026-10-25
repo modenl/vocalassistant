@@ -9,10 +9,11 @@ import { L } from '../i18n.js';
 const COLORS = ['#2fbf71', '#f0b429', '#e0708e', '#8fb8f0', '#c792ea', '#5fd4c4'];
 export const rowColor = (i) => COLORS[i % COLORS.length];
 
-// points: [{ F1, F2, label, color, hollow }]; trail: [{ F1, F2 }] (the current one's recent path)
+// points: [{ F1, F2, label, color, hollow }]; trail: [{ F1, F2 }] (the current one's recent path).
+// A small canvas (under 220 × 340) gets the compact version: shorter words, smaller marks.
 export function drawVowelChart(canvas, { sex = 'm', points = [], trail = [] } = {}) {
   const { ctx, w, h } = fit(canvas);
-  const f = sex === 'f';
+  const f = sex === 'f', mini = h < 220 || w < 340;
   const F2MIN = f ? 700 : 600, F2MAX = f ? 3100 : 2600, F1MIN = f ? 250 : 200, F1MAX = f ? 1150 : 1000;
   const x0 = 40, x1 = w - 10, y0 = 10, y1 = h - 30;
   // phonetic convention: front vowels (high F2) on the left, high tongue (low F1) on top; log scales
@@ -22,16 +23,16 @@ export function drawVowelChart(canvas, { sex = 'm', points = [], trail = [] } = 
   ctx.strokeStyle = THEME.grid; ctx.lineWidth = 1; ctx.fillStyle = THEME.muted; ctx.font = THEME.font;
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
   for (const v of [800, 1000, 1500, 2000, 2500, 3000]) if (v >= F2MIN && v <= F2MAX) { ctx.beginPath(); ctx.moveTo(X(v) + 0.5, y0); ctx.lineTo(X(v) + 0.5, y1); ctx.stroke(); ctx.fillText(`${v}`, X(v), y1 + 3); }
-  ctx.fillText(L('← F2 高：舌头靠前　　　F2（Hz）　　　F2 低：舌头靠后 →', '← high F2: tongue forward        F2 (Hz)        low F2: tongue back →'), (x0 + x1) / 2, y1 + 15);
+  ctx.fillText(mini ? L('← 舌头靠前　F2　舌头靠后 →', '← tongue forward   F2   tongue back →') : L('← F2 高：舌头靠前　　　F2（Hz）　　　F2 低：舌头靠后 →', '← high F2: tongue forward        F2 (Hz)        low F2: tongue back →'), (x0 + x1) / 2, y1 + 15);
   ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
   for (const v of [300, 400, 500, 600, 800, 1000]) if (v >= F1MIN && v <= F1MAX) { ctx.beginPath(); ctx.moveTo(x0, Y(v) + 0.5); ctx.lineTo(x1, Y(v) + 0.5); ctx.stroke(); ctx.fillText(`${v}`, x0 - 4, Y(v)); }
   ctx.save(); ctx.translate(10, (y0 + y1) / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
-  ctx.fillText(L('F1（Hz）↓ 越低舌头越高', 'F1 (Hz) ↓ lower = tongue higher'), 0, 0); ctx.restore();
+  ctx.fillText(mini ? L('F1 ↓ 舌头高', 'F1 ↓ tongue high') : L('F1（Hz）↓ 越低舌头越高', 'F1 (Hz) ↓ lower = tongue higher'), 0, 0); ctx.restore();
   // reference vowels (Peterson & Barney 1952)
   for (const v of REF_VOWELS) {
     const r = v[f ? 'f' : 'm'], px = X(r[1]), py = Y(r[0]);
-    ctx.fillStyle = 'rgba(169,176,191,0.18)'; ctx.beginPath(); ctx.arc(px, py, 16, 0, 2 * Math.PI); ctx.fill();
-    ctx.fillStyle = THEME.text2; ctx.font = 'bold 13px -apple-system, "PingFang SC", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(169,176,191,0.18)'; ctx.beginPath(); ctx.arc(px, py, mini ? 11 : 16, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = THEME.text2; ctx.font = `bold ${mini ? 11 : 13}px -apple-system, "PingFang SC", sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(L(v.zh, v.ipa), px, py);
   }
   // the current sound's path
@@ -44,7 +45,7 @@ export function drawVowelChart(canvas, { sex = 'm', points = [], trail = [] } = 
     if (!(p.F1 > 0 && p.F2 > 0)) continue;
     const px = X(p.F2), py = Y(p.F1);
     ctx.lineWidth = 2.5; ctx.strokeStyle = p.color; ctx.fillStyle = p.hollow ? 'rgba(0,0,0,0)' : p.color;
-    ctx.beginPath(); ctx.arc(px, py, 6.5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py, mini ? 5 : 6.5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
     ctx.fillStyle = p.color; ctx.font = THEME.font; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
     ctx.fillText(p.label, px + 9, py - 3);
   }

@@ -19,6 +19,19 @@ import { formantTrust, fmMedians } from './vowels.js';
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 const TAU = 0.25; // s: smoothing
 
+// The tract's shape from one moment's numbers, as the schematic draws it: the
+// tongue from F1/F2 (k: 1.17 for a woman, whose formants run ≈ 17 % higher), the
+// pharynx narrowing from the ring (absolute: no reference). Unknown = NaN.
+export function tractOf({ F1, F2, ring, k = 1 }) {
+  const fm = F1 > 0 && F2 > 0;
+  return {
+    tongueHigh: fm ? clamp01((850 - F1 / k) / (850 - 280)) : NaN,
+    tongueFront: fm ? clamp01((F2 / k - 850) / (2300 - 850)) : NaN,
+    pharynx: Number.isFinite(ring) ? clamp01((28 - ring) / 16) : NaN,
+    larynx: NaN, velum: NaN, problems: [],
+  };
+}
+
 export class VoiceState {
   constructor({ sex = 'm' } = {}) {
     this.k = sex === 'f' ? 1.17 : 1; // female formants ≈ 17 % higher
@@ -94,17 +107,16 @@ export class VoiceState {
     // nasality (A1−P0) is only measurable at low pitch on open vowels, and noisy:
     // shown when ≥ 10 frames of the last second had it
     const fmOk = singing && fresh(s.fmT), nasOk = singing && fresh(s.nasT) && (this.nasTimes?.length ?? 0) >= 10;
-    const F1 = s.F1 / this.k, F2 = s.F2 / this.k;
     // reference tract length: set by the user, else the median so far
     const B = this.base, sameVowel = B && Math.abs(s.F1 - B.F1) <= 0.15 * B.F1 && Math.abs(s.F2 - B.F2) <= 0.15 * B.F2;
     const vtlRef = sameVowel ? B.vtl : NaN;
     const sprRef = this.base?.spr;
     const st = {
       singing, f0: s.f0, hasBase: !!B,
-      tongueHigh: fmOk ? clamp01((850 - F1) / (850 - 280)) : NaN,
-      tongueFront: fmOk ? clamp01((F2 - 850) / (2300 - 850)) : NaN,
+      tongueHigh: fmOk ? tractOf({ F1: s.F1, F2: s.F2, k: this.k }).tongueHigh : NaN,
+      tongueFront: fmOk ? tractOf({ F1: s.F1, F2: s.F2, k: this.k }).tongueFront : NaN,
       // pharynx narrowing: against the reference if there is one, else absolute
-      pharynx: singing && Number.isFinite(s.spr) ? (Number.isFinite(sprRef) ? clamp01((sprRef - s.spr) / 12) : clamp01((28 - s.spr) / 16)) : NaN,
+      pharynx: singing && Number.isFinite(s.spr) ? (Number.isFinite(sprRef) ? clamp01((sprRef - s.spr) / 12) : tractOf({ ring: s.spr }).pharynx) : NaN,
       larynx: fmOk && Number.isFinite(vtlRef) && Number.isFinite(s.vtl) ? (vtlRef - s.vtl) / vtlRef : NaN, // + = raised
       velum: nasOk ? clamp01((s.nasal + 2) / 12) : NaN, // 1 = raised (oral), 0 = lowered (nasal: A1−P0 ≤ −2 dB)
       closure: singing && Number.isFinite(s.oq) ? clamp01((0.9 - s.oq) / 0.55) : NaN, // 1 = pressed, 0 = breathy

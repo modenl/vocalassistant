@@ -16,7 +16,9 @@ import { captureTabAudio, canCaptureTab } from '../along/tabcapture.js';
 import { VOICE_TYPES, midiName } from '../config.js';
 import { notesOf, bestLag, compareAlong, phrasesOf, coverOf } from '../along/compare.js';
 import { drawAlong, drawSpectraPair, ALONG_COLORS } from '../viz/along.js';
-import { spectrumAt, harmonicsOf, formantsAt, pitchRelation } from '../along/spectra.js';
+import { pitchRelation, voiceSide } from '../along/spectra.js';
+import { VoiceCards } from './voiceCards.js';
+import { vowelOf } from '../analysis/vowels.js';
 import { pitchNowHtml } from './pitchNow.js';
 import { L } from '../i18n.js';
 
@@ -71,7 +73,8 @@ export class AlongView {
         <p class="muted al-cap" id="alCap">${L('原唱的旋律用 MELODIA 算法从歌曲里提取（Essentia.js）：前奏、间奏里的乐器旋律也可能被画出来，那几段不用跟。', 'The original’s melody is extracted from the song with the MELODIA algorithm (Essentia.js): instrumental intros and solos may show up too — no need to sing those.')}</p>
         <h4 class="ls-h">${L('频谱对照：同一时刻的原唱和你', 'Spectra: the original and you at the same moment')}</h4>
         <canvas class="viz" id="alSpec" style="height:270px"></canvas>
-        <p class="muted al-cap">${L('怎么看：竖粗线 F0 是基频，就是你听到的音高；后面一串点是谐波（F0 的 2 倍、3 倍……，编了号）。两条线的 F0 对齐 = 同一个音。低一个八度时，你的点密一倍，你的第 2 根谐波正好落在原唱的 F0 上（虚线连着重合的谐波）——音名一样、只差八度。紫色虚线 F1、F2 是你的共振峰：口腔喉咙放大声音的位置，决定元音，和音高无关（原唱混着伴奏，测不准，不标）。唱完以后，点上面音高图的任何位置，就显示那一刻。', 'How to read it: the thick line F0 is the fundamental — the pitch you hear; the dots after it are the harmonics (2×, 3× F0 …, numbered). F0s lined up = the same note. An octave lower, your dots are twice as dense and your 2nd harmonic sits on the original’s F0 (dashed links join coinciding harmonics) — the same note name, an octave apart. The purple dashed F1, F2 are your formants: where your mouth and throat boost the sound, setting the vowel, not the pitch (not shown for the original: the band gets in the way). After singing, click anywhere on the pitch chart above to see that moment.')}</p>
+        <div id="alCards"></div>
+        <p class="muted al-cap">${L('怎么看：粗竖线 F0 是基频，就是你听到的音高；连着各次谐波（F0 的 2 倍、3 倍……）的线是包络，它的形状由口腔喉咙决定。两条 F0 对齐 = 同一个音；低一个八度时，你的谐波密一倍，你的第 2 根谐波落在原唱的 F0 上（虚线），音名一样、只差八度。紫色 F1、F2 是共振峰——包络的前两个峰，决定元音，和音高无关（原唱混着伴奏，只用它旋律的谐波来估计，标 ≈）。蓝色区域 2–4 kHz 看共鸣：这一段的谐波比低频弱得越少，声音越亮、越有穿透力（好的歌声约 10–20 dB）。唱完以后，点上面音高图的任何位置，就显示那一刻。', 'How to read it: the thick line F0 is the fundamental — the pitch you hear; the line through the harmonics (2×, 3× F0 …) is the envelope, shaped by mouth and throat. F0s lined up = the same note; an octave lower, your harmonics are twice as dense and your 2nd sits on the original’s F0 (dashed) — the same note name, an octave apart. Purple F1, F2 are the formants — the envelope’s first two peaks, setting the vowel, not the pitch (for the original, mixed with the band, estimated from its melody’s harmonics: ≈). The blue 2–4 kHz band shows the ring: the less those harmonics fall below the lows, the brighter the voice carries (good singing ≈ 10–20 dB). After singing, click anywhere on the pitch chart above to see that moment.')}</p>
       </div>
       <div id="alRes"></div>`;
     const $ = (id) => this.root.querySelector('#' + id);
@@ -90,6 +93,7 @@ export class AlongView {
     $('alYtLoad').onclick = () => this.loadYt($('alUrl').value);
     $('alUrl').onkeydown = (e) => { if (e.key === 'Enter') this.loadYt($('alUrl').value); };
     $('alNow').innerHTML = this.nowHtml(null, null);
+    this.cards = new VoiceCards($('alCards'), [{ key: 'ref', label: L('原唱', 'Original'), color: ALONG_COLORS.ref }, { key: 'user', label: L('你', 'You'), color: ALONG_COLORS.mine }], { sex: VOICE_TYPES[this.app.settings.voiceType]?.sex });
     this.draw();
   }
 
@@ -380,12 +384,26 @@ export class AlongView {
     const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
     const rf = near(song.mel.frames.filter((f) => Math.abs(f.t - t) < 0.05), t, 0.03), uf = near(this.user.filter((u) => Math.abs(u.t - this.lag - t) < 0.08).map((u) => ({ t: u.t - this.lag, midi: u.midi })), t, 0.05);
     const rF0 = rf ? hz(rf.midi) : 0, uF0 = uf ? hz(uf.midi) : 0;
-    const rs = rx && rx.length === N ? spectrumAt(rx, rsr, N / 2, N) : null, us = ux ? spectrumAt(ux, M.sr, N / 2, N) : null;
     const rel = pitchRelation(rF0, uF0);
-    const side = (spec, f0) => (spec ? { spec, f0, name: f0 ? midiName(Math.round(69 + 12 * Math.log2(f0 / 440))) : '', harm: harmonicsOf(spec, f0, 2500) } : null);
-    const user = side(us, uF0);
-    if (user && uF0) user.formants = formantsAt(ux, M.sr, N / 2 + Math.round(0.02 * M.sr), uF0);
-    drawSpectraPair(cv, { ref: side(rs, rF0), user, say: this.relationText(rel, rF0, uF0, t) });
+    // the singer's F1/F2 by LPC; the original's from its melody's harmonics (the band is mixed in)
+    const refS = rx && rx.length === N ? voiceSide(rx, rsr, N / 2, rF0, { N, mixed: true }) : null, user = ux ? voiceSide(ux, M.sr, N / 2, uF0, { N }) : null;
+    this.cards?.update({ ref: refS?.f0 ? refS : null, user: user?.f0 ? user : null });
+    drawSpectraPair(cv, { ref: refS, user, say: this.relationText(rel, rF0, uF0, t), say2: this.ringText(refS, user) });
+  }
+
+  // the ring (2–4 kHz below the lows) and the vowel, original against singer
+  ringText(r, u) {
+    const sex = VOICE_TYPES[this.app.settings.voiceType]?.sex;
+    const vow = (s) => { const v = s?.formants && vowelOf(s.formants[0], s.formants[1], sex); return v ? L(`像“${v.zh}”`, `like “${v.en.split(' ')[0]}”`) : ''; };
+    const rr = r?.ring, ur = u?.ring;
+    if (!Number.isFinite(ur) && !Number.isFinite(rr)) return '';
+    const vtxt = vow(r) && vow(u) && vow(r) !== vow(u) ? L(`；元音：原唱${vow(r)}，你${vow(u)}`, `; vowel: original ${vow(r)}, you ${vow(u)}`) : '';
+    if (Number.isFinite(rr) && Number.isFinite(ur)) {
+      const d = Math.round(ur - rr);
+      return L(`共鸣（2–4 kHz 比低频弱多少，越小越亮）：原唱 ${Math.round(rr)} dB，你 ${Math.round(ur)} dB${Math.abs(d) < 3 ? '，差不多' : d > 0 ? `——你这一刻比原唱闷 ${d} dB` : `——你这一刻比原唱亮 ${-d} dB`}${vtxt}`,
+        `Ring (2–4 kHz below the lows, smaller = brighter): original ${Math.round(rr)} dB, you ${Math.round(ur)} dB${Math.abs(d) < 3 ? ', about the same' : d > 0 ? ` — you’re ${d} dB duller here` : ` — you’re ${-d} dB brighter here`}${vtxt}`);
+    }
+    return Number.isFinite(ur) ? L(`你的共鸣：2–4 kHz 比低频弱 ${Math.round(ur)} dB（越小越亮，好的歌声约 10–20）`, `Your ring: 2–4 kHz ${Math.round(ur)} dB below the lows (smaller = brighter; good singing ≈ 10–20)`) : '';
   }
 
   relationText(rel, rF0, uF0, t) {

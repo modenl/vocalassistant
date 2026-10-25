@@ -1,6 +1,6 @@
-// "Voice scope" views: the waveform (time domain), the spectrum and a scrolling
-// spectrogram (frequency domain), and a schematic vocal tract driven by the
-// estimates in analysis/voiceState.js.
+// "Voice scope" views: the waveform (time domain), a scrolling spectrogram
+// (frequency domain; the spectrum itself is viz/voiceSpec.js), and a schematic
+// vocal tract driven by the estimates in analysis/voiceState.js.
 
 import { fit, THEME, makeLut } from './common.js';
 import { L } from '../i18n.js';
@@ -33,63 +33,6 @@ export function drawWave(canvas, x, sr, f0) {
   ctx.stroke();
   ctx.fillStyle = THEME.muted; ctx.font = THEME.font; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
   ctx.fillText(f0 > 0 ? L(`${(span / sr * 1000).toFixed(0)} 毫秒 · 一个周期 ${(1000 / f0).toFixed(2)} 毫秒（${Math.round(f0)} Hz）`, `${(span / sr * 1000).toFixed(0)} ms · one period ${(1000 / f0).toFixed(2)} ms (${Math.round(f0)} Hz)`) : L('没有稳定的音高', 'no steady pitch'), 6, 4);
-}
-
-// Spectrum 0–5 kHz: the frame's spectrum, the noise floor, the harmonics of f0,
-// the formant envelope (LPC) with F1–F3, and the singer's-formant band 2–4 kHz.
-export function drawSpectrum(canvas, S) {
-  const { ctx, w, h } = fit(canvas);
-  const x0 = 34, x1 = w - 6, y0 = 8, y1 = h - 18;
-  const X = (f) => x0 + (f / FMAX) * (x1 - x0);
-  const top = S?.spec ? Math.max(-20, Math.ceil((Math.max(...Array.from(S.spec.subarray(1, Math.round(FMAX / S.binHz)))) + 5) / 10) * 10) : -20, bot = top - 80;
-  const Y = (db) => y0 + ((top - Math.max(bot, Math.min(top, db))) / (top - bot)) * (y1 - y0);
-  ctx.clearRect(0, 0, w, h);
-  // the 2–4 kHz band
-  ctx.fillStyle = 'rgba(57,135,229,0.10)'; ctx.fillRect(X(2000), y0, X(4000) - X(2000), y1 - y0);
-  ctx.fillStyle = 'rgba(120,170,240,0.9)'; ctx.font = THEME.font; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  ctx.fillText(L('歌手共振峰带 2–4 kHz', "singer's formant 2–4 kHz") + (Number.isFinite(S?.spr) ? L(`：比低频弱 ${Math.round(S.spr)} dB`, `: ${Math.round(S.spr)} dB below the lows`) : ''), (X(2000) + X(4000)) / 2, y0 + 2);
-  // grid
-  ctx.strokeStyle = THEME.grid; ctx.lineWidth = 1; ctx.fillStyle = THEME.muted; ctx.textBaseline = 'top';
-  for (let f = 0; f <= FMAX; f += 1000) { ctx.beginPath(); ctx.moveTo(X(f) + 0.5, y0); ctx.lineTo(X(f) + 0.5, y1); ctx.stroke(); ctx.fillText(f ? `${f / 1000}k` : '0', X(f), y1 + 3); }
-  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-  for (let d = top; d >= bot; d -= 20) { ctx.beginPath(); ctx.moveTo(x0, Y(d) + 0.5); ctx.lineTo(x1, Y(d) + 0.5); ctx.stroke(); ctx.fillText(`${d}`, x0 - 4, Y(d)); }
-  if (!S?.spec) return;
-  const n = Math.round(FMAX / S.binHz);
-  // noise floor (median of the shown spectrum)
-  const floor = [...S.spec.subarray(1, n)].sort((a, b) => a - b)[n >> 1];
-  ctx.setLineDash([4, 4]); ctx.strokeStyle = 'rgba(160,160,160,0.6)';
-  ctx.beginPath(); ctx.moveTo(x0, Y(floor)); ctx.lineTo(x1, Y(floor)); ctx.stroke(); ctx.setLineDash([]);
-  ctx.fillStyle = THEME.muted; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'; ctx.fillText(L('底噪', 'noise floor'), x1, Y(floor) - 2);
-  // spectrum
-  ctx.strokeStyle = THEME.text2; ctx.lineWidth = 1.2; ctx.beginPath();
-  for (let k = 1; k < n; k++) { const px = X(k * S.binHz), py = Y(S.spec[k]); k > 1 ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
-  ctx.stroke();
-  // harmonics
-  if (S.f0 > 0) {
-    ctx.fillStyle = '#f0b429';
-    for (let k = 1; k * S.f0 < FMAX; k++) {
-      const b = Math.round((k * S.f0) / S.binHz);
-      let m = b; for (let i = b - 2; i <= b + 2; i++) if (S.spec[i] > S.spec[m]) m = i;
-      ctx.beginPath(); ctx.arc(X(m * S.binHz), Y(S.spec[m]), 2.6, 0, 2 * Math.PI); ctx.fill();
-    }
-  }
-  // formant envelope, lifted to sit on the harmonic peaks
-  if (S.env) {
-    const { freqs, db } = S.env;
-    let off = -Infinity;
-    for (let i = 0; i < freqs.length; i++) if (freqs[i] < FMAX) { const k = Math.round(freqs[i] / S.binHz); off = Math.max(off, S.spec[k] - db[i]); }
-    ctx.strokeStyle = '#2fbf71'; ctx.lineWidth = 2; ctx.beginPath();
-    let first = true;
-    for (let i = 0; i < freqs.length; i++) { if (freqs[i] > FMAX) break; const px = X(freqs[i]), py = Y(db[i] + off); first ? ctx.moveTo(px, py) : ctx.lineTo(px, py); first = false; }
-    ctx.stroke();
-    ctx.fillStyle = '#2fbf71'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    (S.formants || []).slice(0, 3).forEach((fm, i) => {
-      if (fm.f > FMAX) return;
-      ctx.strokeStyle = 'rgba(47,191,113,0.5)'; ctx.setLineDash([2, 3]);
-      ctx.beginPath(); ctx.moveTo(X(fm.f), y0 + 16); ctx.lineTo(X(fm.f), y1); ctx.stroke(); ctx.setLineDash([]);
-      ctx.fillText(`F${i + 1} ${Math.round(fm.f)}`, X(fm.f), y0 + 30);
-    });
-  }
 }
 
 // Scrolling spectrogram: one column per analysed frame, 0–5 kHz, with the
@@ -142,14 +85,27 @@ export class Spectrogram {
   }
 }
 
+// The tract's parts in words (the labels of the schematic): { tongue, velum, pharynx, larynx }
+export function tractWords(st) {
+  const known = (v) => Number.isFinite(v), unk = L('测不了', 'n/a');
+  const hi = st.tongueHigh, fr = st.tongueFront, ph = st.pharynx, lar = st.larynx;
+  return {
+    tongue: known(hi) ? `${hi >= 0.6 ? L('高', 'high') : hi <= 0.35 ? L('低', 'low') : L('中', 'mid')} · ${fr >= 0.6 ? L('靠前', 'front') : fr <= 0.35 ? L('靠后', 'back') : L('居中', 'central')}` : unk,
+    velum: known(st.velum) ? (st.velum >= 0.5 ? L('抬起', 'raised') : L('下垂（鼻音）', 'lowered (nasal)')) : unk,
+    pharynx: known(ph) ? (ph >= 0.6 ? L('2–4 kHz 强（可能收窄）', 'strong 2–4 kHz (maybe narrowed)') : ph >= 0.3 ? L('2–4 kHz 偏强', 'some 2–4 kHz') : L('2–4 kHz 弱', 'little 2–4 kHz')) : unk,
+    larynx: known(lar) ? (lar >= 0.06 ? L('偏高', 'raised') : lar <= -0.06 ? L('偏低', 'lowered') : L('正常', 'normal')) : st.hasBase ? L('元音和基准不同', 'vowel ≠ reference') : L('设基准后可测', 'set a reference'),
+  };
+}
+
 // Schematic vocal tract, midsagittal (face to the left). Driven by the
 // estimates: tongue height / frontness, pharynx narrowing (twang), larynx
 // height, soft palate. Unknown parts are drawn faint and labelled "测不了".
 // Parts with a problem glow red and are pointed at.
 export class TractView {
-  constructor(el) {
+  // mini: no labels or callouts (say it in words beside it: tractWords)
+  constructor(el, { mini = false } = {}) {
     this.el = el;
-    el.innerHTML = `<svg viewBox="0 0 340 300" class="tract" role="img" aria-label="${L('声道示意图', 'Vocal tract diagram')}">
+    el.innerHTML = `<svg viewBox="${mini ? '20 0 290 300' : '0 0 340 300'}" class="tract${mini ? ' mini' : ''}" role="img" aria-label="${L('声道示意图', 'Vocal tract diagram')}">
       <defs><marker id="tvArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ef5a5a"/></marker></defs>
       <path class="tv-head" d="M70,18 C130,2 220,4 262,34 C292,58 300,110 292,150 C286,190 270,215 262,300 L140,300 C138,262 132,240 112,226 C92,218 70,214 56,206 C46,200 44,190 46,182 C40,178 36,170 40,164 C34,160 32,152 38,146 C32,140 32,132 40,126 C44,120 42,116 30,108 C22,102 20,96 24,90 C34,72 48,40 70,18 Z"/>
       <path class="tv-nose" d="M52,92 C90,80 150,82 196,96 L200,108 C150,104 96,106 58,110 Z"/>
@@ -198,14 +154,13 @@ export class TractView {
     // the airway: mouth, over the tongue, down the pharynx to the folds
     this.$('tvAir').setAttribute('d', `M42,${143 + jaw / 2} C60,${hy - 6} ${hx - 20},${hy - 14} ${hx},${hy - 12} C${hx + 50},${hy - 14} 205,${hy - 18} ${wallX - 4},${hy - 4}
       L${wallX - 4 - ph * 6},${lY - 8} L${cx},${lY} L${rootX + 4},${lY - 34} C${rootX + 8},${hy + 24} ${hx + 36},${hy + 4} ${hx},${hy + 2} C${hx - 30},${hy + 2} 56,${hy + 10} 44,${150 + jaw} Z`);
-    const unk = L('测不了', 'n/a');
-    const tongueTxt = known(st.tongueHigh) ? `${hi >= 0.6 ? L('高', 'high') : hi <= 0.35 ? L('低', 'low') : L('中', 'mid')} · ${fr >= 0.6 ? L('靠前', 'front') : fr <= 0.35 ? L('靠后', 'back') : L('居中', 'central')}` : unk;
+    const W = tractWords(st);
     const lab = [
       // [name, value, label x, label y, anchor point]
-      [L('舌', 'Tongue'), tongueTxt, 70, 262, [hx, hy + 14]],
-      [L('软腭', 'Soft palate'), known(st.velum) ? (vel >= 0.5 ? L('抬起', 'raised') : L('下垂（鼻音）', 'lowered (nasal)')) : unk, 150, 58, [vx, vy]],
-      [L('咽腔', 'Pharynx'), known(st.pharynx) ? (ph >= 0.6 ? L('2–4 kHz 强（可能收窄）', 'strong 2–4 kHz (maybe narrowed)') : ph >= 0.3 ? L('2–4 kHz 偏强', 'some 2–4 kHz') : L('2–4 kHz 弱', 'little 2–4 kHz')) : unk, 312, 150, [wallX, 170]],
-      [L('喉', 'Larynx'), known(st.larynx) ? (lar >= 0.06 ? L('偏高', 'raised') : lar <= -0.06 ? L('偏低', 'lowered') : L('正常', 'normal')) : st.hasBase ? L('元音和基准不同', 'vowel ≠ reference') : L('设基准后可测', 'set a reference'), 312, 250, [246, lY]],
+      [L('舌', 'Tongue'), W.tongue, 70, 262, [hx, hy + 14]],
+      [L('软腭', 'Soft palate'), W.velum, 150, 58, [vx, vy]],
+      [L('咽腔', 'Pharynx'), W.pharynx, 312, 150, [wallX, 170]],
+      [L('喉', 'Larynx'), W.larynx, 312, 250, [246, lY]],
     ];
     this.$('tvLabels').innerHTML = lab.map(([t, v, x, y, [ax, ay]]) => `<line x1="${x}" y1="${y + 4}" x2="${ax}" y2="${ay}" class="tl-lead"/><text x="${x}" y="${y}" text-anchor="middle"><tspan class="tl-name">${t}</tspan><tspan x="${x}" dy="12" class="tl-val">${v}</tspan></text>`).join('');
     // problems: the part glows and a numbered arrow points at it

@@ -5,7 +5,7 @@ import { FrameAnalyzer } from '../js/dsp/analyzer.js';
 import { PitchTracker } from '../js/analysis/pitch.js';
 import { DEFAULT_SETTINGS } from '../js/config.js';
 import { notesOf, bestLag, compareAlong } from '../js/along/compare.js';
-import { spectrumAt, harmonicsOf, formantsAt, pitchRelation } from '../js/along/spectra.js';
+import { spectrumAt, harmonicsOf, formantsAt, pitchRelation, ringOf, envelopeFormants } from '../js/along/spectra.js';
 import { synth, hz, VOWELS } from '../tools/synth.mjs';
 
 const sr = 44100;
@@ -92,6 +92,20 @@ const run = (opts) => { const u = sing(opts), L = bestLag(refFrames, u); return 
   ok('harmonics: found at k × F0', hm.length >= 20 && hm.every((h) => Math.abs(h.f / (h.k * 110) - 1) < 0.01), hm.slice(0, 4).map((h) => Math.round(h.f)).join(' '));
   const fm = formantsAt(x, sr, 22050, 110);
   ok('the singer’s F1, F2 (“ah”: 730, 1150 Hz)', fm && Math.abs(fm[0] / 730 - 1) < 0.1 && Math.abs(fm[1] / 1150 - 1) < 0.1, fm?.map(Math.round).join(' / '));
+  // F1/F2 from the harmonics' levels (used for the original, mixed with a band)
+  const hm4 = harmonicsOf(sp, 110, 4000), ef = envelopeFormants(hm4, 110);
+  ok('F1, F2 from the harmonics alone (“ah”)', ef && Math.abs(ef[0] / 730 - 1) < 0.12 && Math.abs(ef[1] / 1150 - 1) < 0.12, ef?.map(Math.round).join(' / '));
+  // …also at a higher, sparser pitch and for other vowels (an LPC envelope through
+  // the harmonics, not their raw peaks: at 220 Hz "ah"'s F1 and F2 merge into one hump)
+  for (const [v, f0, F] of [['a', 220, [730, 1150]], ['i', 220, [300, 2250]], ['u', 220, [330, 850]], ['a', 330, [730, 1150]]]) {
+    const xv = Float32Array.from(synth([{ dur: 1, f0: () => f0, vowel: VOWELS[v], oq: 0.55, sq: 2.4 }], sr));
+    const e = envelopeFormants(harmonicsOf(spectrumAt(xv, sr, 22050), f0, 4000), f0);
+    ok(`F1, F2 from the harmonics: “${v}” at ${f0} Hz`, e && Math.abs(e[0] / F[0] - 1) < 0.32 && Math.abs(e[1] / F[1] - 1) < 0.12, e?.map(Math.round).join(' / '));
+  }
+  // ring from the harmonics: a ringing “ah” (F3–F5 close) rings more than a plain one
+  const xr = Float32Array.from(synth([{ dur: 1, f0: () => 110, vowel: VOWELS.aRing, oq: 0.55, sq: 2.4 }], sr));
+  const plainRing = ringOf(hm4), ringing = ringOf(harmonicsOf(spectrumAt(xr, sr, 22050), 110, 4000));
+  ok('ring from the harmonics: the ringing voice is brighter', ringing < plainRing - 6, `ringing ${ringing.toFixed(0)} dB vs plain ${plainRing.toFixed(0)} dB`);
 }
 
 console.log(fails ? `\n${fails} FAILED` : '\nall sing-along checks passed');
