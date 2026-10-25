@@ -8,6 +8,9 @@
 // while shown.
 //   const a = new AnalysisAnim(canvas); a.setSong(x, sr); a.start();
 //   a.update({ stage, progress, device, part, bytes, total }); a.melody(notes); a.stop();
+// A song heard from a web player first: a.capturing(secs, scale) and a.feed(block, sr)
+// as it comes in (step 0, "recording"), then setSong(x, sr, { scale, keep: true }).
+// scale: song seconds per second of x (1.5 when it was played at 1.5×).
 
 import { fit, THEME } from './common.js';
 import { L } from '../i18n.js';
@@ -16,6 +19,7 @@ import { ALONG_COLORS } from './along.js';
 const SANS = '-apple-system, "PingFang SC", sans-serif', MONO = 'ui-monospace, Menlo, monospace';
 const VOX = ALONG_COLORS.ref, BAND = '#a58fd8', MIX = '#7d8699';
 const SEG = 343980 / 44100, STRIDE = SEG * 0.75; // Demucs' 7.8 s stretches, 25 % overlap
+const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 
 export class AnalysisAnim {
   constructor(canvas) {
@@ -24,15 +28,40 @@ export class AnalysisAnim {
   }
 
   reset() {
+    this.capture = false; this.scale = 1;
     this.stage = 'prepare'; this.progress = 0; this.device = ''; this.t0 = performance.now();
     this.sepT0 = 0; this.segT = []; this.lastSegAt = 0; this.done = 0; this.total = 1;
     this.vox = null; this.band = null; this.particles = []; this.notes = null; this.notesAt = 0;
     this.bytes = 0; this.bytesTotal = 0; this.stageAt = { prepare: performance.now() };
   }
 
-  // the song (mono samples): its waveform as peaks per 10 ms
-  setSong(x, sr = 44100) {
+  // a song being recorded: secs (of the recording) expected, played `scale`× fast
+  capturing(secs, scale = 1) {
     this.reset();
+    this.capture = true; this.scale = scale; this.stage = 'capture'; this.stageAt.capture = performance.now();
+    this.secs = secs; this.bin = 480; this.mix = new Float32Array(Math.ceil(secs * 100) + 1); this.norm = 4; this.got = 0; this.fed = 0;
+    this.vox = new Float32Array(this.mix.length); this.band = new Float32Array(this.mix.length); this.filled = new Uint8Array(this.mix.length);
+  }
+
+  // recorded samples as they come in (at sr): the waveform grows
+  feed(block, sr) {
+    if (!this.capture || this.stage !== 'capture') return;
+    const bin = sr / 100;
+    for (let i = 0; i < block.length; i++) {
+      const j = Math.floor((this.fed + i) / bin);
+      if (j >= this.mix.length) break;
+      const a = Math.abs(block[i]); if (a > this.mix[j]) this.mix[j] = a;
+      if (a * this.norm > 1) this.norm = 1 / a;
+    }
+    this.fed += block.length; this.got = this.fed / sr;
+  }
+
+  // the song (mono samples): its waveform as peaks per 10 ms
+  setSong(x, sr = 44100, { scale = 1, keep = false } = {}) {
+    const was = keep ? { t0: this.t0, stageAt: this.stageAt, capture: this.capture } : null;
+    this.reset();
+    if (was) { this.t0 = was.t0; this.stageAt = was.stageAt; this.capture = was.capture; }
+    this.scale = scale;
     this.secs = x.length / sr; this.bin = Math.round(sr / 100);
     const n = Math.ceil(x.length / this.bin), env = new Float32Array(n);
     for (let i = 0; i < x.length; i++) { const a = Math.abs(x[i]), j = (i / this.bin) | 0; if (a > env[j]) env[j] = a; }
@@ -111,32 +140,36 @@ export class AnalysisAnim {
       ctx.globalAlpha = 1;
     }
     if (sep) this.drawBeam(ctx, X(beamT), lanes, now, h, Math.floor((beamT / this.secs) * n));
+    if (this.stage === 'capture') this.drawRec(ctx, X(Math.min(this.secs, this.got)), lanes[0], now);
     this.drawParticles(ctx, now);
     if (this.stage === 'melody') this.drawScan(ctx, x0, x1, lanes[1], now);
     if (this.notes) this.drawNotes(ctx, X, lanes[1], now);
     // the time axis
     ctx.fillStyle = THEME.muted; ctx.font = `10px ${MONO}`; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    const step = this.secs > 240 ? 60 : this.secs > 90 ? 30 : 10;
-    for (let t = 0; t <= this.secs; t += step) ctx.fillText(`${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`, X(t), h - 14);
+    const step = this.secs * this.scale > 240 ? 60 : this.secs * this.scale > 90 ? 30 : 10;
+    // the song's own time (a recording at 1.5× covers 1.5 s of song per second)
+    const songSecs = this.secs * this.scale;
+    for (let t = 0; t <= songSecs; t += step) ctx.fillText(`${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`, X(t / this.scale), h - 14);
   }
 
   drawSteps(ctx, w, now) {
-    const order = ['prepare', 'separate', 'melody'], cur = this.stage === 'download' || this.stage === 'load' ? 'prepare' : this.stage === 'done' ? 'end' : this.stage;
-    const idx = cur === 'end' ? 3 : order.indexOf(cur);
-    const names = [L('载入分离模型', 'Load the model'), L('分离人声与伴奏', 'Separate vocal / band'), L('提取原唱旋律', 'Extract the melody')];
-    const subs = [
+    const order = [...(this.capture ? ['capture'] : []), 'prepare', 'separate', 'melody'], cur = this.stage === 'download' || this.stage === 'load' ? 'prepare' : this.stage === 'done' ? 'end' : this.stage;
+    const N = order.length, idx = cur === 'end' ? N : order.indexOf(cur);
+    const names = [...(this.capture ? [L(`${this.scale} 倍速录下原曲`, `Record at ${this.scale}×`)] : []), L('载入分离模型', 'Load the model'), L('分离人声与伴奏', 'Separate vocal / band'), L('提取原唱旋律', 'Extract the melody')];
+    const subs = [...(this.capture ? [`${fmt(this.got * this.scale)} / ${fmt(this.secs * this.scale)}`] : []),
       this.stage === 'download' && this.bytesTotal ? `${(this.bytes / 1e6).toFixed(0)} / ${(this.bytesTotal / 1e6).toFixed(0)} MB` : 'Demucs v4 · htdemucs',
       this.device ? `${this.device === 'webgpu' ? 'WebGPU' : 'CPU'} · ${this.done}/${this.total} ${L('段', 'parts')}` : `${this.total} × 7.8 s`,
       'MELODIA · Essentia.js',
     ];
-    const pw = Math.min(250, (w - 40) / 3), gap = (w - 3 * pw) / 4;
-    for (let i = 0; i < 3; i++) {
+    const pw = Math.min(250, (w - 40) / N), gap = (w - N * pw) / (N + 1);
+    for (let i = 0; i < N; i++) {
       const x = gap + i * (pw + gap), y = 12, active = i === idx, done = i < idx;
-      if (i < 2) { ctx.strokeStyle = done ? 'rgba(111,220,111,0.6)' : 'rgba(255,255,255,0.12)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x + pw + 4, y + 20); ctx.lineTo(x + pw + gap - 4, y + 20); ctx.stroke(); }
+      if (i < N - 1) { ctx.strokeStyle = done ? 'rgba(111,220,111,0.6)' : 'rgba(255,255,255,0.12)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x + pw + 4, y + 20); ctx.lineTo(x + pw + gap - 4, y + 20); ctx.stroke(); }
       ctx.fillStyle = active ? 'rgba(91,156,240,0.14)' : 'rgba(255,255,255,0.03)'; ctx.strokeStyle = active ? `rgba(91,156,240,${0.55 + 0.35 * Math.sin(now / 260)})` : done ? 'rgba(111,220,111,0.45)' : 'rgba(255,255,255,0.08)';
       ctx.lineWidth = active ? 1.6 : 1; ctx.beginPath(); ctx.roundRect(x, y, pw, 40, 8); ctx.fill(); ctx.stroke();
       // the step's own progress along its bottom edge
-      const p = done ? 1 : active ? (i === 0 ? (this.stage === 'download' ? this.progress : this.stage === 'load' ? 0.5 + 0.5 * Math.sin(now / 300) ** 2 : 0) : i === 1 ? this.progress : (now / 1400) % 1) : 0;
+      const step = order[i];
+      const p = done ? 1 : active ? (step === 'capture' ? Math.min(1, this.got / this.secs) : step === 'prepare' ? (this.stage === 'download' ? this.progress : this.stage === 'load' ? 0.5 + 0.5 * Math.sin(now / 300) ** 2 : 0) : step === 'separate' ? this.progress : (now / 1400) % 1) : 0;
       if (p > 0) { ctx.fillStyle = done ? '#6fdc6f' : VOX; ctx.fillRect(x + 8, y + 36, (pw - 16) * p, 2); }
       ctx.fillStyle = done ? '#6fdc6f' : active ? VOX : THEME.muted; ctx.beginPath(); ctx.arc(x + 18, y + 20, 9, 0, 2 * Math.PI); ctx.fill();
       ctx.fillStyle = '#0c0f16'; ctx.font = `bold 11px ${SANS}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(done ? '✓' : String(i + 1), x + 18, y + 20.5);
@@ -146,11 +179,21 @@ export class AnalysisAnim {
     // time taken, left, speed
     const el = (now - this.t0) / 1000;
     let right = L(`已用 ${el.toFixed(0)} 秒`, `${el.toFixed(0)} s so far`);
+    if (this.stage === 'capture') right += L(` · 录音还剩约 ${Math.max(0, Math.ceil(this.secs - this.got))} 秒`, ` · about ${Math.max(0, Math.ceil(this.secs - this.got))} s of recording left`);
     if (this.stage === 'separate' && this.done > 0) {
       const per = this.segT.reduce((a, b) => a + b, 0) / this.segT.length / 1000, left = per * (this.total - this.done);
       right += L(` · 还剩约 ${Math.ceil(left)} 秒 · ${(STRIDE / per).toFixed(1)}× 实时`, ` · about ${Math.ceil(left)} s left · ${(STRIDE / per).toFixed(1)}× realtime`);
     }
     ctx.fillStyle = THEME.text2; ctx.font = `11px ${MONO}`; ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic'; ctx.fillText(right, w - 14, 68);
+  }
+
+  // recording: a red head where the sound is coming in
+  drawRec(ctx, x, ln, now) {
+    const a = 0.6 + 0.4 * Math.sin(now / 180);
+    ctx.strokeStyle = `rgba(239,90,90,${a})`; ctx.lineWidth = 2; ctx.shadowColor = '#ef5a5a'; ctx.shadowBlur = 10;
+    ctx.beginPath(); ctx.moveTo(x, ln.y - ln.hh - 10); ctx.lineTo(x, ln.y + ln.hh + 10); ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.fillStyle = `rgba(239,90,90,${a})`; ctx.beginPath(); ctx.arc(x + 10, ln.y - ln.hh - 6, 4, 0, 2 * Math.PI); ctx.fill();
+    ctx.font = `bold 10.5px ${MONO}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText('REC', x + 17, ln.y - ln.hh - 6);
   }
 
   // the beam over the mix, and the sound splitting off it

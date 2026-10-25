@@ -16,18 +16,20 @@ export async function decodeSong(blob, ctx) {
 }
 
 // → { frames: [{ t, midi }], notes: [{ t0, t1, midi, name }], secs }
-export function extractMelody(x, a4 = 440) {
+// rate: x was played that many times faster (pitch kept); times come back at
+// the real pace (t = seconds of x × rate)
+export function extractMelody(x, a4 = 440, { rate = 1 } = {}) {
   return new Promise((resolve, reject) => {
     const w = new Worker(new URL('./melody-worker.js', import.meta.url), { type: 'module' });
     w.onmessage = (e) => {
       w.terminate();
       if (e.data.error) { reject(new Error(e.data.error)); return; }
-      const frames = melodyFrames(e.data.f0, MEL_HOP / MEL_SR, a4);
-      resolve({ frames, notes: notesOf(frames), secs: x.length / MEL_SR });
+      const frames = melodyFrames(e.data.f0, (MEL_HOP / MEL_SR) * rate, a4);
+      resolve({ frames, notes: notesOf(frames), secs: (x.length / MEL_SR) * rate });
     };
     w.onerror = (e) => { w.terminate(); reject(new Error(e.message || 'worker failed')); };
     const copy = Float32Array.from(x);
-    w.postMessage({ x: copy, hop: MEL_HOP }, [copy.buffer]);
+    w.postMessage({ x: copy, hop: MEL_HOP, rate }, [copy.buffer]);
   });
 }
 
