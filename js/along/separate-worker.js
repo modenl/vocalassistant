@@ -10,7 +10,7 @@
 //  • without: timcsy/demucs-web-onnx (180 MB, fp32), on the CPU (WebAssembly).
 // The STFT / iSTFT around the network: demucs-web@1.0.2 (MIT). The model is
 // downloaded once and kept in the browser's cache; the audio never leaves the page.
-// in: { x: Float32Array mono at 44.1 kHz } | { release } → out: { stage, progress } … { vocals, device, secs } | { error } | { released }
+// in: { x: Float32Array mono at 44.1 kHz, cpu? (no WebGPU) } | { release } → out: { stage, progress } … { vocals, device, secs } | { error } | { released }
 
 const ORT = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
 const DEMUCS = 'https://cdn.jsdelivr.net/npm/demucs-web@1.0.2/src/index.js';
@@ -46,7 +46,10 @@ async function fetchBytes(url, onBytes = () => {}) {
 }
 
 // the 21 pieces, loaded one by one; what each run feeds forward is freed after its last use
-async function loadSplit() {
+// gpuIO: what one piece hands the next stays on the GPU (fast; Chrome). Off:
+// it goes through the CPU — for WebKit, whose WebGPU froze the whole page on
+// the second segment with it on (Safari 27 on a Mac; an iPhone was closed)
+async function loadSplit(gpuIO = true) {
   const manifest = JSON.parse(new TextDecoder().decode(await fetchBytes(`${SPLIT}htdemucs_split_manifest.json`)));
   let got = 0;
   const pieces = [];
@@ -56,7 +59,7 @@ async function loadSplit() {
     const t0 = performance.now();
     const session = await ort.InferenceSession.create(bytes, {
       executionProviders: [i === 0 ? { name: 'webgpu', forceCpuNodeNames: CPU_NODES } : 'webgpu'],
-      graphOptimizationLevel: 'all', preferredOutputLocation: 'gpu-buffer',
+      graphOptimizationLevel: 'all', ...(gpuIO ? { preferredOutputLocation: 'gpu-buffer' } : {}),
     });
     bytes = null; // only the GPU keeps it
     pieces.push({ ...p, session });
@@ -66,18 +69,25 @@ async function loadSplit() {
   pieces.forEach((p, i) => p.inputs.forEach((n) => { last[n] = i; }));
   // the cached single-file model isn't needed any more
   try { await (await caches.open(CACHE)).delete(FULL); } catch { /* none */ }
-  return { split: true, pieces, last, out: manifest.outputs };
+  return { split: true, gpuIO, pieces, last, out: manifest.outputs };
 }
 
-async function loadFull() {
+async function loadFull(ep = 'wasm') {
   let got = 0;
   const bytes = await fetchBytes(FULL, (n) => { got += n; say({ stage: 'download', progress: Math.min(1, got / FULL_BYTES), bytes: got, total: FULL_BYTES }); });
   say({ stage: 'load', progress: 0 });
-  const session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'basic' });
+  const session = await ort.InferenceSession.create(bytes, { executionProviders: [ep], graphOptimizationLevel: 'basic' });
   return { split: false, session };
 }
 
-async function load() {
+// WebKit (every iPhone browser, Safari on a Mac): its WebGPU closed the page
+// while the model's pieces were being set up (an iPhone with iOS 27: the
+// second of 21 pieces, 17 MB in — not memory), so there the CPU runs it
+const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\/|Edg\//.test(navigator.userAgent);
+
+// variant (tools/sep-test.html, to find what WebKit's WebGPU can run):
+// 'split-gpu' | 'full-gpu' | 'full-cpu'; default: the best this browser allows
+async function load(forceCpu = false, variant = '') {
   if (model) return model;
   ort = await import(`${ORT}ort.webgpu.min.mjs`);
   ort.env.wasm.wasmPaths = ORT;
@@ -89,6 +99,14 @@ async function load() {
     gpu = !!ad;
     if (ad) wlog('adapter', { vendor: ad.info?.vendor, arch: ad.info?.architecture, maxBuffer: ad.limits?.maxBufferSize, maxStorage: ad.limits?.maxStorageBufferBindingSize });
   } catch (err) { wlog('adapter-error', { msg: String(err?.message || err) }); }
+  if (variant) {
+    wlog('variant', { variant });
+    if (variant === 'split-gpu' || variant === 'split-gpu-cpuio') { model = await loadSplit(variant === 'split-gpu'); device = 'webgpu'; }
+    else { model = await loadFull(variant === 'full-gpu' ? 'webgpu' : 'wasm'); device = variant === 'full-gpu' ? 'webgpu' : 'wasm'; }
+    wlog('model-ready', { variant });
+    return model;
+  }
+  if (gpu && (WEBKIT || forceCpu)) { wlog('gpu-skipped', { webkit: WEBKIT, forced: forceCpu }); gpu = false; }
   wlog('ort-ready', { gpu, threads: ort.env.wasm.numThreads });
   say({ stage: 'load', progress: 0, device: gpu ? 'webgpu' : 'wasm', model: gpu ? 'split-fp16' : 'full-fp32' });
   const errs = [];
@@ -114,7 +132,7 @@ async function runSegment(M, waveform, magSpec, S, B, F) {
     Object.assign(map, r);
     for (const n of p.inputs) if (M.last[n] === i && !keep.has(n) && n !== 'mix' && n !== 'mag') { map[n].dispose?.(); delete map[n]; }
   }
-  const td = await map[M.out.time].getData(), fd = await map[M.out.freq].getData();
+  const td = M.gpuIO ? await map[M.out.time].getData() : map[M.out.time].data, fd = M.gpuIO ? await map[M.out.freq].getData() : map[M.out.freq].data;
   map[M.out.time].dispose?.(); map[M.out.freq].dispose?.();
   return { td, fd };
 }
@@ -176,7 +194,7 @@ self.onmessage = async (e) => {
   wlog('job', { secs: +(e.data.x.length / 44100).toFixed(1) });
   try {
     say({ stage: 'load', progress: 0 });
-    await load();
+    await load(!!e.data.cpu, e.data.variant || '');
     const t0 = performance.now(), r = await separate(e.data.x);
     self.postMessage({ ...r, device, model: model.split ? 'split-fp16' : 'full-fp32', secs: (performance.now() - t0) / 1000 }, [r.vocals.buffer]);
   } catch (err) { wlog('error', { msg: String(err?.message || err).slice(0, 300) }); say({ error: String(err?.message || err) }); }

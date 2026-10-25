@@ -6,7 +6,7 @@ const root = new URL('../', import.meta.url);
 const dist = new URL('dist/', root);
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist);
-for (const p of ['index.html', 'css', 'js']) cpSync(new URL(p, root), new URL(p, dist), { recursive: true });
+for (const p of ['index.html', 'sep-test.html', 'css', 'js', 'tools/speedtest-song.js']) cpSync(new URL(p, root), new URL(p, dist), { recursive: true });
 
 // Pages response headers: allow the mic for this origin only, and revalidate
 // scripts on every load so a new deploy is picked up immediately.

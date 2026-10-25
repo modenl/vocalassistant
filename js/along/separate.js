@@ -8,7 +8,7 @@ import { dlog } from '../dlog.js';
 
 let worker = null, pending = null;
 
-export async function separateVocals(x, { onProgress } = {}) {
+export async function separateVocals(x, { onProgress, cpu = false, variant = '' } = {}) {
   await releaseSeparator(); // one song at a time: a newer one replaces the older
   return new Promise((resolve, reject) => {
     pending = reject;
@@ -23,7 +23,7 @@ export async function separateVocals(x, { onProgress } = {}) {
     };
     worker.onerror = (e) => { dlog('worker-onerror', { msg: String(e.message) }); releaseSeparator(); done(reject, new Error(e.message || 'separation failed')); };
     const copy = Float32Array.from(x);
-    worker.postMessage({ x: copy }, [copy.buffer]);
+    worker.postMessage({ x: copy, cpu, variant }, [copy.buffer]);
   });
 }
 

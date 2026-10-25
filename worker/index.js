@@ -5,8 +5,10 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/api/log' && request.method === 'POST') {
-      const body = (await request.text()).slice(0, 4000);
-      console.log(`[vocallab] ${request.headers.get('cf-connecting-ip') ? '' : ''}${body}`);
+      // one line or a batch of them
+      let lines;
+      try { const j = JSON.parse((await request.text()).slice(0, 64000)); lines = Array.isArray(j) ? j : [j]; } catch { lines = []; }
+      for (const l of lines.slice(0, 200)) console.log(`[vocallab] ${JSON.stringify(l).slice(0, 2000)}`);
       return new Response(null, { status: 204 });
     }
     return env.ASSETS.fetch(request);
