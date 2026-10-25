@@ -24,6 +24,7 @@ const CPU_NODES = ['/ReduceMean', '/Sub', '/Pow', '/ReduceMean_1', '/Clip', '/Sq
 
 let model = null, device = '', ort = null;
 const say = (m) => self.postMessage(m);
+const wlog = (event, data = {}) => self.postMessage({ log: { event, ...data } }); // diagnostics (js/dlog.js)
 
 // a file's bytes: from the cache, else downloaded (progress: onBytes(n)) and cached
 async function fetchBytes(url, onBytes = () => {}) {
@@ -51,12 +52,15 @@ async function loadSplit() {
   const pieces = [];
   for (const [i, p] of manifest.pieces.entries()) {
     let bytes = await fetchBytes(`${SPLIT}${p.file}`, (n) => { got += n; say({ stage: 'download', progress: Math.min(1, got / SPLIT_BYTES), bytes: got, total: SPLIT_BYTES }); });
+    wlog('piece-bytes', { i, mb: +(bytes.length / 1e6).toFixed(1) });
+    const t0 = performance.now();
     const session = await ort.InferenceSession.create(bytes, {
       executionProviders: [i === 0 ? { name: 'webgpu', forceCpuNodeNames: CPU_NODES } : 'webgpu'],
       graphOptimizationLevel: 'all', preferredOutputLocation: 'gpu-buffer',
     });
     bytes = null; // only the GPU keeps it
     pieces.push({ ...p, session });
+    wlog('piece-session', { i, ms: Math.round(performance.now() - t0) });
   }
   const last = {};
   pieces.forEach((p, i) => p.inputs.forEach((n) => { last[n] = i; }));
@@ -80,13 +84,18 @@ async function load() {
   // threads need a cross-origin-isolated page (not this one: it embeds YouTube)
   ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(8, navigator.hardwareConcurrency || 4) : 1;
   let gpu = false;
-  try { gpu = !!(self.navigator.gpu && await self.navigator.gpu.requestAdapter()); } catch { /* none */ }
+  try {
+    const ad = self.navigator.gpu && await self.navigator.gpu.requestAdapter();
+    gpu = !!ad;
+    if (ad) wlog('adapter', { vendor: ad.info?.vendor, arch: ad.info?.architecture, maxBuffer: ad.limits?.maxBufferSize, maxStorage: ad.limits?.maxStorageBufferBindingSize });
+  } catch (err) { wlog('adapter-error', { msg: String(err?.message || err) }); }
+  wlog('ort-ready', { gpu, threads: ort.env.wasm.numThreads });
   say({ stage: 'load', progress: 0, device: gpu ? 'webgpu' : 'wasm', model: gpu ? 'split-fp16' : 'full-fp32' });
   const errs = [];
   if (gpu) {
-    try { model = await loadSplit(); device = 'webgpu'; return model; } catch (err) { errs.push(`webgpu: ${err?.message || err}`); }
+    try { model = await loadSplit(); device = 'webgpu'; wlog('model-ready', { model: 'split-fp16' }); return model; } catch (err) { errs.push(`webgpu: ${err?.message || err}`); wlog('split-error', { msg: String(err?.message || err).slice(0, 300) }); }
   }
-  try { model = await loadFull(); device = 'wasm'; return model; } catch (err) { errs.push(`wasm: ${err?.message || err}`); }
+  try { model = await loadFull(); device = 'wasm'; wlog('model-ready', { model: 'full-fp32' }); return model; } catch (err) { errs.push(`wasm: ${err?.message || err}`); wlog('full-error', { msg: String(err?.message || err).slice(0, 300) }); }
   throw new Error(errs.join(' | '));
 }
 
@@ -127,7 +136,9 @@ async function separate(x) {
     let t = performance.now();
     const inp = prepareModelInput(seg, seg);
     tCpu += performance.now() - t; t = performance.now();
+    wlog('segment-start', { k, of: segs });
     const { td, fd } = await runSegment(model, inp.waveform, inp.magSpec, S, B, F);
+    wlog('segment-done', { k, ms: Math.round(performance.now() - t) });
     tGpu += performance.now() - t; t = performance.now();
     // the vocal's spectrogram (left channel), padded as demucs-web's standaloneIspec, back to time
     let fv = null;
@@ -161,11 +172,12 @@ async function release() {
 }
 
 self.onmessage = async (e) => {
-  if (e.data.release) { await release(); self.postMessage({ released: true }); return; }
+  if (e.data.release) { await release(); wlog('released'); self.postMessage({ released: true }); return; }
+  wlog('job', { secs: +(e.data.x.length / 44100).toFixed(1) });
   try {
     say({ stage: 'load', progress: 0 });
     await load();
     const t0 = performance.now(), r = await separate(e.data.x);
     self.postMessage({ ...r, device, model: model.split ? 'split-fp16' : 'full-fp32', secs: (performance.now() - t0) / 1000 }, [r.vocals.buffer]);
-  } catch (err) { say({ error: String(err?.message || err) }); }
+  } catch (err) { wlog('error', { msg: String(err?.message || err).slice(0, 300) }); say({ error: String(err?.message || err) }); }
 };

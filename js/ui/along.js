@@ -28,6 +28,7 @@ import { VoiceCards } from './voiceCards.js';
 import { vowelOf } from '../analysis/vowels.js';
 import { pitchNowHtml } from './pitchNow.js';
 import { L } from '../i18n.js';
+import { dlog, dlogStart } from '../dlog.js';
 
 // A YouTube video is analysed from its sound played once, faster. A synthetic
 // song with a known melody, sped up by the browser (pitch kept), captured and
@@ -79,6 +80,7 @@ export class AlongView {
 
   render() {
     this.rendered = true;
+    dlogStart();
     this.root.innerHTML = `
       <div class="ph"><h3 style="font-size:16px">${L('跟原唱唱', 'Sing along')}</h3>
         <span class="sub">${L('先分析原唱，再戴耳机跟着唱：蓝色是原唱的每个音，彩色线是你，两边都标音名（如 A3）', 'Analyse the original first, then sing along on headphones: blue = the original’s notes, the coloured line = you, note names on both (e.g. A3)')}</span></div>
@@ -137,6 +139,7 @@ export class AlongView {
     try {
       const was = JSON.parse(localStorage.getItem(STEP_KEY) || 'null');
       clearStep();
+      if (was) dlog('last-crash', was);
       if (was && Date.now() - was.at < 30 * 60e3) {
         const dev = L(`这台设备${was.gpu ? '有' : '没有'} WebGPU${was.model ? `，用的是${was.model === 'split-fp16' ? ' 126 MB 小模型（GPU）' : ' 180 MB 大模型（CPU）'}` : ''}`, `this device ${was.gpu ? 'has' : 'has no'} WebGPU${was.model ? `, using the ${was.model === 'split-fp16' ? '126 MB small model (GPU)' : '180 MB large model (CPU)'}` : ''}`);
         this.say(L(`上次分析“${was.name}”时，在“${STEP_NAMES()[was.step] || was.step}”这一步页面被系统关掉了（多半是内存不够；${dev}）。`, `Last time, analysing “${was.name}”, the page was closed by the system while ${STEP_NAMES()[was.step] || was.step} (most likely out of memory; ${dev}).`));
@@ -230,7 +233,10 @@ export class AlongView {
     const anim = (this.anim = new AnalysisAnim(acv));
     anim.capturing(Math.max(10, dur / rate), rate); anim.start();
     node.port.onmessage = (e) => { if (P.getPlayerState?.() !== 1) return; chunks.push(e.data); n += e.data.length; anim.feed(e.data, ctx.sampleRate); };
+    dlog('capture-start', { rate, dur: +dur.toFixed(1), sr: ctx.sampleRate, ctxState: ctx.state });
+    let logged = 0;
     const iv = setInterval(() => {
+      if (n / ctx.sampleRate - logged >= 10) { logged = n / ctx.sampleRate; dlog('capture', { secs: +logged.toFixed(0), state: P.getPlayerState?.(), at: +(P.getCurrentTime?.() || 0).toFixed(1), ctxState: ctx.state }); }
       if (P.getPlayerState?.() === 1) marks.push([n / ctx.sampleRate, P.getCurrentTime()]);
       if (P.getPlayerState?.() === 0 || (dur && P.getCurrentTime() >= dur - 0.2)) ended();
     }, 100);
@@ -273,11 +279,14 @@ export class AlongView {
     $('alYtBox').hidden = false;
     $('alYt').innerHTML = `<video src="${url}" playsinline preload="auto"></video><button class="al-tapgo" id="alTapGo" hidden>▶ ${L('点这里开始分析', 'Tap to start the analysis')}</button>`;
     const el = $('alYt').querySelector('video');
+    dlog('video-picked', { mb: +(file.size / 1e6).toFixed(1), type: file.type, ext: (file.name.match(/\.\w+$/) || [''])[0] });
+    for (const ev of ['error', 'stalled', 'waiting', 'emptied', 'abort']) el.addEventListener(ev, () => dlog(`video-${ev}`, { t: +el.currentTime.toFixed(1), err: el.error?.code }));
     this.player = new VideoPlayer(el);
     this.controls(); $('alYtLock').hidden = true;
     const fail = (t) => { this.busy = false; clearStep(); if (this.song === song) { this.dropSong(); this.song = null; } this.say(t); this.controls(); this.draw(0); };
     try { await new Promise((ok, bad) => { el.onloadedmetadata = ok; el.onerror = () => bad(new Error('unreadable')); }); } catch { fail(L('这个视频在浏览器里放不了（换成 mp4 / mov 试试）。', 'This video won’t play in the browser (try an mp4 / mov).')); return; }
     if (this.song !== song) return;
+    dlog('video-meta', { dur: +el.duration.toFixed(1), w: el.videoWidth, h: el.videoHeight });
     // the tap: the audio context and the playing both have to start inside it
     const go = $('alTapGo');
     go.hidden = false;
@@ -285,6 +294,7 @@ export class AlongView {
     const { ctx, src } = await new Promise((ok) => {
       go.onclick = () => {
         go.hidden = true;
+        dlog('tap');
         const c = new AudioContext(); c.resume();
         const s = c.createMediaElementSource(el); // from now on its sound goes to the analysis only
         el.muted = false; el.playbackRate = PRE_RATE; el.play().catch(() => {});
@@ -293,6 +303,7 @@ export class AlongView {
     });
     $('alYtLock').hidden = false;
     const r = await this.capturePlayer(song, this.player, ctx, src);
+    dlog('captured', r ? { secs: +(r.x.length / 44100).toFixed(1), a: +r.a.toFixed(3), b: +r.b.toFixed(4) } : { none: true });
     if (this.song !== song) return;
     if (!r) { fail(L('没录到视频的声音（视频没有声音，或者没放起来）。', 'The video’s sound wasn’t recorded (it has none, or didn’t play).')); return; }
     // the element's sound now belongs to the closed analysis context: a fresh one for singing
@@ -391,6 +402,7 @@ export class AlongView {
     this.controls();
     this.say(L(`正在读取“${file.name}”…`, `Reading “${file.name}”…`));
     markStep('read', song);
+    dlog('file-picked', { mb: +(file.size / 1e6).toFixed(1), type: file.type });
     try {
       const tmp = new AudioContext();
       const { buf, x } = await decodeSong(file, tmp);
@@ -666,6 +678,7 @@ export class AlongView {
     const go = this.anim?.capture && this.anim.raf, anim = go ? this.anim : (this.anim = new AnalysisAnim(acv));
     anim.setSong(x, 44100, { scale, keep: !!go }); if (!go) anim.start();
     show(L('第 1 步：准备人声分离模型（Demucs）…', 'Step 1: getting the vocal-separation model (Demucs) ready…'), 0);
+    dlog('analyse', { secs: +(x.length / 44100).toFixed(1), rate });
     try {
       const r = await separateVocals(x, {
         onProgress: (d) => { anim.update(d); const { stage, progress, device } = d; if (d.model) stepModel = d.model; markStep(stage === 'separate' ? 'separate' : 'model', song); show(
@@ -675,9 +688,11 @@ export class AlongView {
           stage === 'load' ? 1 : progress); },
       });
       vox = r.vocals;
+      dlog('separated', { secs: +r.secs.toFixed(1), device: r.device, model: r.model });
       why = L(`人声分离用 ${r.device === 'webgpu' ? 'GPU' : 'CPU'} ${r.secs.toFixed(0)} 秒`, `vocal separated on the ${r.device === 'webgpu' ? 'GPU' : 'CPU'} in ${r.secs.toFixed(0)} s`);
     } catch (err) {
       why = err.message;
+      dlog('separate-failed', { msg: String(why).slice(0, 300) });
     } finally {
       await releaseSeparator(); // the model leaves memory before the singing
     }
@@ -698,6 +713,7 @@ export class AlongView {
     back();
     song.vox = { x: vox, sr: 44100, offset, scale };
     song.ready = true;
+    dlog('ready', { notes: m.notes.length });
     clearStep();
     show(L(`✓ 分析完成（${why}），模型已卸载`, `✓ Analysed (${why}), model unloaded`), null, 'ok');
     return song.mel;
