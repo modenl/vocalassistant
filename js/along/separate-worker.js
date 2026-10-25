@@ -26,7 +26,7 @@ async function modelBytes() {
     const { done, value } = await rd.read();
     if (done) break;
     out.set(value, got); got += value.length;
-    say({ stage: 'download', progress: got / total });
+    say({ stage: 'download', progress: got / total, bytes: got, total });
   }
   const bytes = got === total ? out : out.slice(0, got);
   try { await cache?.put(MODEL, new Response(bytes)); } catch { /* full: download again next time */ }
@@ -89,8 +89,11 @@ async function separate(x) {
       out[start + i] += (td[tb + i] + (fv ? fv[i] : 0)) * w; wsum[start + i] += w;
     }
     for (const name of s.outputNames) r[name].dispose?.();
+    // this stretch's vocal and band as envelopes (peak per 10 ms), for the page's animation
+    const BIN = 441, nb = Math.ceil(len / BIN), ve = new Float32Array(nb), be = new Float32Array(nb);
+    for (let i = 0; i < len; i++) { const vv = td[tb + i] + (fv ? fv[i] : 0), j = (i / BIN) | 0, a = Math.abs(vv), b = Math.abs(x[start + i] - vv); if (a > ve[j]) ve[j] = a; if (b > be[j]) be[j] = b; }
     tCpu += performance.now() - t;
-    say({ stage: 'separate', progress: ++k / segs, device });
+    self.postMessage({ stage: 'separate', progress: ++k / segs, device, part: { start, ve, be, bin: BIN } }, [ve.buffer, be.buffer]);
   }
   for (let i = 0; i < n; i++) if (wsum[i] > 0) out[i] /= wsum[i];
   return { vocals: out, gpu: tGpu / 1000, cpu: tCpu / 1000 };

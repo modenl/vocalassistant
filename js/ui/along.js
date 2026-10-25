@@ -12,6 +12,7 @@ import { FrameAnalyzer } from '../dsp/analyzer.js';
 import { PitchTracker } from '../analysis/pitch.js';
 import { decodeSong, extractMelody, resampleTo44k } from '../along/melody.js';
 import { separateVocals, releaseSeparator } from '../along/separate.js';
+import { AnalysisAnim } from '../viz/analysisAnim.js';
 import { videoIdOf, createPlayer, bilibiliEmbedOf } from '../along/youtube.js';
 import { captureTabAudio, canCaptureTab } from '../along/tabcapture.js';
 import { VOICE_TYPES, midiName } from '../config.js';
@@ -64,6 +65,7 @@ export class AlongView {
       <p class="al-tip" id="alTip">🎧 ${L('请戴耳机：原唱只从耳机里放，麦克风就只录到你。用音箱外放时，麦克风会同时录到原唱，结果不准。', 'Wear headphones: the original plays only in them, so the microphone hears only you. Played through speakers, the microphone records the original too and the result isn’t reliable.')}</p>
       <div class="panel">
         <div class="al-scroll" id="alScroll"><canvas class="viz" id="alView" style="height:320px"></canvas></div>
+        <canvas class="viz" id="alAnim" style="height:320px;display:none"></canvas>
         <div class="al-legend">
           <span><i style="background:${ALONG_COLORS.ref}"></i>${L('原唱的音（蓝字 = 音名）', 'the original’s notes (blue = note name)')}</span>
           <span><i style="background:${ALONG_COLORS.good}"></i>${L('你：准（±25 音分）', 'you: in tune (±25 cents)')}</span>
@@ -358,14 +360,19 @@ export class AlongView {
     const pct = (p) => `${Math.round(p * 100)}%`;
     let vox = null, why = '';
     skip.onclick = () => releaseSeparator();
+    // the analysis, animated where the pitch chart will be (the same size)
+    const scroll = this.root.querySelector('#alScroll'), acv = this.root.querySelector('#alAnim');
+    scroll.style.display = 'none'; acv.style.display = '';
+    const anim = (this.anim = new AnalysisAnim(acv));
+    anim.setSong(x); anim.start();
     show(L('第 1 步：准备人声分离模型（Demucs）…', 'Step 1: getting the vocal-separation model (Demucs) ready…'), 0);
     try {
       const r = await separateVocals(x, {
-        onProgress: ({ stage, progress, device }) => show(
+        onProgress: (d) => { anim.update(d); const { stage, progress, device } = d; show(
           stage === 'download' ? L(`第 1 步：下载人声分离模型（约 180 MB，只下载这一次）… ${pct(progress)}`, `Step 1: downloading the vocal-separation model (about 180 MB, this once only)… ${pct(progress)}`)
             : stage === 'load' ? L('第 1 步：载入人声分离模型…', 'Step 1: loading the vocal-separation model…')
             : L(`第 2 步：把原唱的人声和伴奏分开（${device === 'webgpu' ? 'GPU' : 'CPU，较慢'}）… ${pct(progress)}`, `Step 2: separating the original’s vocal from the band (${device === 'webgpu' ? 'GPU' : 'CPU, slower'})… ${pct(progress)}`),
-          stage === 'load' ? 1 : progress),
+          stage === 'load' ? 1 : progress); },
       });
       vox = r.vocals;
       why = L(`人声已分离（${r.device === 'webgpu' ? 'GPU' : 'CPU'}，${r.secs.toFixed(0)} 秒）`, `vocal separated (${r.device === 'webgpu' ? 'GPU' : 'CPU'}, ${r.secs.toFixed(0)} s)`);
@@ -374,11 +381,17 @@ export class AlongView {
     } finally {
       releaseSeparator(); // the model leaves memory before the singing
     }
-    if (this.song !== song) return song.mel || { frames: [], notes: [], secs: 0 };
+    if (this.song !== song) { anim.stop(); return song.mel || { frames: [], notes: [], secs: 0 }; }
     show(L(`第 3 步：从${vox ? '人声' : '混音'}里提取原唱的旋律…`, `Step 3: extracting the original’s melody from the ${vox ? 'vocal' : 'mix'}…`), 1);
-    const m = await extractMelody(vox || x, this.app.settings.a4).catch(() => { throw new Error(L('提取不出旋律', 'no melody could be extracted')); });
+    anim.update({ stage: 'melody' });
+    const back = () => { anim.stop(); if (this.anim === anim) { acv.style.display = 'none'; scroll.style.display = ''; } };
+    const m = await extractMelody(vox || x, this.app.settings.a4).catch(() => { back(); throw new Error(L('提取不出旋律', 'no melody could be extracted')); });
     const frames = m.frames.map((f) => ({ t: f.t + offset, midi: f.midi }));
     song.mel = { frames, notes: notesOf(frames), secs: Math.max(song.mel?.secs || 0, offset + m.secs) };
+    // the notes rise into place, then the pitch chart takes over
+    anim.melody(m.frames.length ? notesOf(m.frames) : []);
+    await new Promise((r) => setTimeout(r, 1400));
+    back();
     if (vox) song.vox = { x: vox, sr: 44100, offset };
     show(vox ? L(`✓ ${why}，模型已卸载：原唱的旋律和频谱只看人声，伴奏不干扰`, `✓ ${why}, model unloaded: the original’s melody and spectra use the vocal alone, free of the band`)
       : L(`${why}：原唱按混音分析（伴奏可能被当成旋律）`, `${why}: the original is analysed from the mix (the band may be taken for the melody)`), null, vox ? 'ok' : 'warn');
