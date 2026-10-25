@@ -72,6 +72,11 @@ export function drawVoiceLane(ctx, box, side, { color = '#2fbf71', label = '', f
     const half = ctx.measureText(text).width / 2;
     fmRight = tag(text, Math.max(X(F), fmRight + 6 + half), y0 + 1, 'center', FM_COLOR, font)[1];
   }
+  // a pitch but no F1/F2: say why
+  if (side.f0 > 0 && !(side.formants?.length)) {
+    const font = `${fs(11)} ${SANS}`;
+    fmRight = tag(side.f0 > 450 ? L('F1/F2 测不了：音高 > 450 Hz，谐波太稀', 'F1/F2 n/a: pitch > 450 Hz, harmonics too sparse') : L('F1/F2 这一刻测不出', 'F1/F2 not found here'), X(fmax * 0.3), y0 + 1, 'left', THEME.muted, font)[1];
+  }
   // F0: the pitch
   let f0Right = -Infinity;
   if (side.f0 > 0) {

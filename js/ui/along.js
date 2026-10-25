@@ -264,11 +264,19 @@ export class AlongView {
       if (this.eng !== eng) return;
       const now = eng.now() - this.startMic - this.lag;
       this.draw(now);
-      if (!this.specAt || performance.now() - this.specAt > 100) { this.specAt = performance.now(); this.drawSpectra(now - 0.06); }
+      if (!this.specAt || performance.now() - this.specAt > 100) { this.specAt = performance.now(); const at = this.knownAt(now - 0.06); this.drawSpectra(at, { late: now - 0.06 - at }); }
       $('alNow').innerHTML = this.nowHtml(this.refAt(now), this.last?.voiced ? this.last.f0 : 0);
       this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
+  }
+
+  // From a tab the original's melody is worked out every 2 s, so the live moment
+  // has none yet: the spectra show the latest moment whose melody is known (up
+  // to 6 s back), so the original's F0, F1, F2 can be drawn at all.
+  knownAt(t) {
+    const fr = this.song?.mel.frames || [], last = fr.length ? fr[fr.length - 1].t : -Infinity;
+    return t - last > 0.1 && t - last <= 6 ? last : t;
   }
 
   // a Bluetooth headset's own microphone: say so where the headphone tip is
@@ -367,7 +375,8 @@ export class AlongView {
   }
 
   // the spectra of the original and the singer at song time t
-  drawSpectra(t) {
+  // late: how far behind the live moment this is (from a tab the melody comes 1–2 s late)
+  drawSpectra(t, { late = 0 } = {}) {
     const cv = this.root.querySelector('#alSpec');
     if (!cv || !this.song || !Number.isFinite(t)) return;
     const N = 4096, song = this.song;
@@ -382,13 +391,16 @@ export class AlongView {
     if (M) ux = AlongView.windowOf(M.chunks, (t + this.lag + this.startMic - M.t0) * M.sr, N);
     const near = (fr, tt, dt) => { let b = null; for (const f of fr) { if (Math.abs(f.t - tt) <= dt && (!b || Math.abs(f.t - tt) < Math.abs(b.t - tt))) b = f; } return b; };
     const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
-    const rf = near(song.mel.frames.filter((f) => Math.abs(f.t - t) < 0.05), t, 0.03), uf = near(this.user.filter((u) => Math.abs(u.t - this.lag - t) < 0.08).map((u) => ({ t: u.t - this.lag, midi: u.midi })), t, 0.05);
+    // the original's pitch: the nearest melody frame (MELODIA leaves gaps between
+    // frames and in breaths: up to 0.1 s away), else the note the moment falls in
+    const rf = near(song.mel.frames.filter((f) => Math.abs(f.t - t) < 0.12), t, 0.1) || this.refAt(t), uf = near(this.user.filter((u) => Math.abs(u.t - this.lag - t) < 0.08).map((u) => ({ t: u.t - this.lag, midi: u.midi })), t, 0.05);
     const rF0 = rf ? hz(rf.midi) : 0, uF0 = uf ? hz(uf.midi) : 0;
     const rel = pitchRelation(rF0, uF0);
     // the singer's F1/F2 by LPC; the original's from its melody's harmonics (the band is mixed in)
     const refS = rx && rx.length === N ? voiceSide(rx, rsr, N / 2, rF0, { N, mixed: true }) : null, user = ux ? voiceSide(ux, M.sr, N / 2, uF0, { N }) : null;
     this.cards?.update({ ref: refS?.f0 ? refS : null, user: user?.f0 ? user : null });
-    drawSpectraPair(cv, { ref: refS, user, say: this.relationText(rel, rF0, uF0, t), say2: this.ringText(refS, user) });
+    const lateTxt = late > 0.3 ? L(`（原唱的旋律要晚一点才算得出来：这是 ${late.toFixed(1)} 秒前）`, ` (the original’s melody is worked out a little late: this is ${late.toFixed(1)} s ago)`) : '';
+    drawSpectraPair(cv, { ref: refS, user, say: this.relationText(rel, rF0, uF0, t) + lateTxt, say2: this.ringText(refS, user) });
   }
 
   // the ring (2–4 kHz below the lows) and the vowel, original against singer
