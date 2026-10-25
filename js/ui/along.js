@@ -49,6 +49,21 @@ const centsTxt = (c) => (c === 0 ? L('正好', 'spot on') : c > 0 ? L(`高 ${c} 
 const octTxt = (k) => (k === 0 ? '' : k < 0 ? L(`低 ${-k} 个八度`, `${-k} octave${k < -1 ? 's' : ''} lower`) : L(`高 ${k} 个八度`, `${k} octave${k > 1 ? 's' : ''} higher`));
 const STATUS_TXT = () => ({ good: L('准', 'in tune'), near: L('略偏', 'slightly off'), off: L('不准', 'off'), missed: L('没唱', 'not sung') });
 
+// A <video> with the YouTube player's calls, so a video file is analysed and
+// sung along with the same way as a YouTube video
+class VideoPlayer {
+  constructor(el) { this.el = el; el.preservesPitch = true; }
+  getAvailablePlaybackRates() { return [0.5, 1, 1.25, 1.5, 2]; }
+  getDuration() { return this.el.duration || 0; }
+  getPlayerState() { return this.el.ended ? 0 : this.el.paused ? 2 : 1; }
+  getCurrentTime() { return this.el.currentTime; }
+  seekTo(t) { this.el.currentTime = t; }
+  setPlaybackRate(r) { this.el.playbackRate = r; }
+  playVideo() { return this.el.play().catch(() => {}); }
+  pauseVideo() { this.el.pause(); }
+  destroy() { this.el.pause(); this.el.removeAttribute('src'); this.el.load(); }
+}
+
 export class AlongView {
   constructor(app, root) {
     this.app = app;
@@ -182,10 +197,29 @@ export class AlongView {
       $('alYt').innerHTML = '<div id="alYtEl"></div>';
       this.player = await createPlayer($('alYtEl'), id);
     } catch (err) { fail(L(`视频载入失败：${err.message}`, `The video didn’t load: ${err.message}`)); return; }
-    const P = this.player, ctx = new AudioContext();
+    const ctx = new AudioContext(), r = await this.capturePlayer(song, this.player, ctx, ctx.createMediaStreamSource(tab), { ended: tab.getAudioTracks()[0] });
+    tab.getTracks().forEach((k) => k.stop());
+    if (!r) { if (this.song === song) fail(L('没录到视频的声音：视频没放起来，或者共享时没打开“同时分享标签页音频”。再点一次“① 分析”。', 'The video’s sound wasn’t recorded: it didn’t play, or “Also share tab audio” was off. Press “① Analyse” again.')); return; }
+    const { x, a, b, rate } = r;
+    try {
+      const mel = await this.analyseSong(song, x, { offset: a, rate, scale: b });
+      if (this.song !== song) return;
+      this.say(L(`分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音。戴上耳机，点“② 开始跟唱”（视频从头原速播放）。`, `Analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes. Put on headphones and press “② Sing along” (the video plays from the start, normal speed).`));
+    } catch (err) { if (this.song === song) this.song = null; this.say(L(`分析失败：${err.message}。再点一次“① 分析”。`, `The analysis failed: ${err.message}. Press “① Analyse” again.`)); }
+    this.busy = false; clearStep(); this.controls(); this.draw(0);
+  }
+
+  // Record a player's sound while it plays the song once from the start at
+  // PRE_RATE× (the animation's recording step): `src` is that sound in `ctx`.
+  // Song time = the player's own time: a straight line fitted to (seconds
+  // recorded, player time) pairs maps the recording onto it. Stops at the end,
+  // when `ended` (a track) ends, or if nothing plays for 12 s.
+  // → { x (44.1 kHz), rate, a, b: song time = a + b · seconds of x } or null (nothing heard)
+  async capturePlayer(song, P, ctx, src, { ended: track = null } = {}) {
+    const $ = this.$;
     await ctx.audioWorklet.addModule(new URL('../audio/capture-worklet.js', import.meta.url));
-    const src = ctx.createMediaStreamSource(tab), node = new AudioWorkletNode(ctx, 'vocal-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' }), sink = ctx.createGain();
-    sink.gain.value = 0; src.connect(node); node.connect(sink).connect(ctx.destination);
+    const node = new AudioWorkletNode(ctx, 'vocal-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' }), sink = ctx.createGain();
+    sink.gain.value = 0; src.connect(node); node.connect(sink).connect(ctx.destination); // heard by the analysis only
     const rate = (P.getAvailablePlaybackRates?.() || [1]).includes(PRE_RATE) ? PRE_RATE : 1;
     const dur = P.getDuration?.() || 0, chunks = [], marks = [];
     let n = 0, ended = null;
@@ -200,7 +234,7 @@ export class AlongView {
       if (P.getPlayerState?.() === 1) marks.push([n / ctx.sampleRate, P.getCurrentTime()]);
       if (P.getPlayerState?.() === 0 || (dur && P.getCurrentTime() >= dur - 0.2)) ended();
     }, 100);
-    tab.getAudioTracks()[0].onended = () => ended();
+    if (track) track.onended = () => ended();
     const box = $('alSep');
     markStep('record', song);
     box.className = 'al-sep busy'; box.querySelector('.al-sep-t').textContent = L(`第 1 步：视频以 ${rate} 倍速放一遍，录下它的声音（只在内存里）`, `Step 1: the video plays once at ${rate}× while its sound is recorded (in memory only)`);
@@ -211,19 +245,64 @@ export class AlongView {
     const stall = setTimeout(() => { if (n === 0) ended(); }, 12000);
     await done;
     clearInterval(iv); clearInterval(fillIv); clearTimeout(stall);
+    node.port.onmessage = null;
     try { P.pauseVideo(); P.setPlaybackRate(1); P.seekTo(0, true); } catch { /* gone */ }
-    tab.getTracks().forEach((k) => k.stop()); ctx.close();
-    if (this.song !== song) { anim.stop(); return; }
-    if (n < ctx.sampleRate * 5) { anim.stop(); scroll.style.display = ''; acv.style.display = 'none'; box.className = 'al-sep warn'; box.querySelector('.al-sep-t').textContent = ''; fail(L('没录到视频的声音：视频没放起来，或者共享时没打开“同时分享标签页音频”。再点一次“① 分析”。', 'The video’s sound wasn’t recorded: it didn’t play, or “Also share tab audio” was off. Press “① Analyse” again.')); return; }
-    // video time = a + b · seconds recorded
+    const sr = ctx.sampleRate;
+    ctx.close();
+    if (this.song !== song || n < sr * 5) { anim.stop(); scroll.style.display = ''; acv.style.display = 'none'; box.className = 'al-sep'; box.querySelector('.al-sep-t').textContent = ''; return null; }
+    // song time = a + b · seconds recorded
     const k = marks.length, sx = marks.reduce((q, p) => q + p[0], 0) / Math.max(1, k), sy = marks.reduce((q, p) => q + p[1], 0) / Math.max(1, k);
     const den = marks.reduce((q, p) => q + (p[0] - sx) ** 2, 0), b = k > 5 && den > 0 ? marks.reduce((q, p) => q + (p[0] - sx) * (p[1] - sy), 0) / den : rate, a = sy - b * sx;
     const x = new Float32Array(n); chunks.forEach((c, i) => x.set(c, i * c.length));
+    chunks.length = 0;
+    return { x: await resampleTo44k(x, sr), rate, a, b };
+  }
+
+  // ① a video file. Read whole and decoded, a phone's video (hundreds of MB
+  // to GBs) made iPhones close the page; so instead it plays in the page once
+  // at PRE_RATE×, its sound going only to the analysis (not heard), recorded
+  // like a YouTube video's — memory then follows the song's length, not the
+  // file's size. A phone lets sound play only after a tap: the analysis starts
+  // with a tap on the video. Singing: the video plays with its sound, song time
+  // = its own time (as YouTube's).
+  async analyseVideo(file) {
+    const $ = this.$;
+    this.dropSong();
+    this.busy = true; this.result = null; this.user = []; this.reviewT = null; $('alRes').innerHTML = '';
+    const url = URL.createObjectURL(file), song = (this.song = { name: file.name, yt: true, video: url, mel: { frames: [], notes: [], secs: 0 } });
+    $('alYtBox').hidden = false;
+    $('alYt').innerHTML = `<video src="${url}" playsinline preload="auto"></video><button class="al-tapgo" id="alTapGo" hidden>▶ ${L('点这里开始分析', 'Tap to start the analysis')}</button>`;
+    const el = $('alYt').querySelector('video');
+    this.player = new VideoPlayer(el);
+    this.controls(); $('alYtLock').hidden = true;
+    const fail = (t) => { this.busy = false; clearStep(); if (this.song === song) { this.dropSong(); this.song = null; } this.say(t); this.controls(); this.draw(0); };
+    try { await new Promise((ok, bad) => { el.onloadedmetadata = ok; el.onerror = () => bad(new Error('unreadable')); }); } catch { fail(L('这个视频在浏览器里放不了（换成 mp4 / mov 试试）。', 'This video won’t play in the browser (try an mp4 / mov).')); return; }
+    if (this.song !== song) return;
+    // the tap: the audio context and the playing both have to start inside it
+    const go = $('alTapGo');
+    go.hidden = false;
+    this.say(L(`点视频上的“▶ 点这里开始分析”：视频会以 ${PRE_RATE} 倍速放一遍给程序听（你听不到），之后才能唱。`, `Tap “▶ Tap to start the analysis” on the video: it plays once at ${PRE_RATE}× for the app to hear (you won’t), then you can sing.`));
+    const { ctx, src } = await new Promise((ok) => {
+      go.onclick = () => {
+        go.hidden = true;
+        const c = new AudioContext(); c.resume();
+        const s = c.createMediaElementSource(el); // from now on its sound goes to the analysis only
+        el.muted = false; el.playbackRate = PRE_RATE; el.play().catch(() => {});
+        ok({ ctx: c, src: s });
+      };
+    });
+    $('alYtLock').hidden = false;
+    const r = await this.capturePlayer(song, this.player, ctx, src);
+    if (this.song !== song) return;
+    if (!r) { fail(L('没录到视频的声音（视频没有声音，或者没放起来）。', 'The video’s sound wasn’t recorded (it has none, or didn’t play).')); return; }
+    // the element's sound now belongs to the closed analysis context: a fresh one for singing
+    $('alYt').innerHTML = `<video src="${url}" playsinline preload="auto"></video>`;
+    this.player = new VideoPlayer($('alYt').querySelector('video'));
     try {
-      const mel = await this.analyseSong(song, await resampleTo44k(x, ctx.sampleRate), { offset: a, rate, scale: b });
+      const mel = await this.analyseSong(song, r.x, { offset: r.a, rate: r.rate, scale: r.b });
       if (this.song !== song) return;
-      this.say(L(`分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音。戴上耳机，点“② 开始跟唱”（视频从头原速播放）。`, `Analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes. Put on headphones and press “② Sing along” (the video plays from the start, normal speed).`));
-    } catch (err) { if (this.song === song) this.song = null; this.say(L(`分析失败：${err.message}。再点一次“① 分析”。`, `The analysis failed: ${err.message}. Press “① Analyse” again.`)); }
+      this.say(L(`“${file.name}”分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音。戴上耳机，点“② 开始跟唱”（视频从头原速播放）。`, `“${file.name}” analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes. Put on headphones and press “② Sing along” (the video plays from the start, normal speed).`));
+    } catch (err) { if (this.song === song) { this.dropSong(); this.song = null; } this.say(L(`分析失败：${err.message}。`, `The analysis failed: ${err.message}.`)); }
     this.busy = false; clearStep(); this.controls(); this.draw(0);
   }
 
@@ -301,19 +380,14 @@ export class AlongView {
     this.busy = false; clearStep(); this.controls(); this.draw(0);
   }
 
-  // ① a song or video file: its sound decoded, then analysed. A video's
-  // picture is shown (muted) and kept in step with the sound while singing.
+  // ① a song file: decoded, then analysed (a video file: analyseVideo)
   async load(file) {
     const $ = this.$;
     if (this.busy || this.eng) return;
+    if (/^video\//.test(file.type) || /\.(mp4|m4v|mov|webm|mkv)$/i.test(file.name)) return this.analyseVideo(file);
     this.busy = true; this.result = null; this.user = []; this.reviewT = null; $('alRes').innerHTML = '';
     this.dropSong();
     const song = (this.song = { name: file.name, mel: { frames: [], notes: [], secs: 0 } });
-    if (/^video\//.test(file.type) || /\.(mp4|m4v|mov|webm|mkv)$/i.test(file.name)) {
-      song.video = URL.createObjectURL(file);
-      $('alYtBox').hidden = false;
-      $('alYt').innerHTML = `<video src="${song.video}" playsinline muted preload="auto"></video>`;
-    }
     this.controls();
     this.say(L(`正在读取“${file.name}”…`, `Reading “${file.name}”…`));
     markStep('read', song);
@@ -333,7 +407,7 @@ export class AlongView {
     } catch (err) {
       if (this.song === song) { this.dropSong(); this.song = null; }
       // decodeAudioData can't read every container (some .mkv, odd codecs)
-      const msg = /decod|EncodingError|Unable/i.test(`${err.name} ${err.message}`) ? L('读不出它的声音（换成 mp4 / mov / mp3 试试）', 'its sound can’t be read (try an mp4 / mov / mp3)') : err.message;
+      const msg = /decod|EncodingError|Unable/i.test(`${err.name} ${err.message}`) ? L('读不出它的声音（换成 mp3 / m4a / wav 试试）', 'its sound can’t be read (try an mp3 / m4a / wav)') : err.message;
       this.say(L(`分析不了这个文件：${msg}`, `Can’t analyse this file: ${msg}`));
     }
     this.busy = false; clearStep(); this.controls(); this.draw(0);
@@ -373,18 +447,12 @@ export class AlongView {
     this.startMic = eng.now() + lead;
     this.lag = (ctx.outputLatency || 0) + (ctx.baseLatency || 0) + 0.03;
     src.onended = () => { if (this.eng === eng) this.stop(); };
-    // a video file: its picture, muted, follows the sound being heard (the
-    // song plays in the audio context; the picture is nudged back whenever it
-    // drifts over 0.12 s)
-    const vid = this.song.video ? this.root.querySelector('#alYt video') : null, outLat = ctx.outputLatency || 0;
-    if (vid) { vid.muted = true; vid.currentTime = 0; setTimeout(() => { if (this.eng === eng) vid.play().catch(() => {}); }, (lead + outLat) * 1000); }
     this.singing(eng);
     let lagAt = 0;
     const tick = () => {
       if (this.eng !== eng) return;
       // the delay, lined up again every 2 s on the last 12 s sung
       const t = eng.now() - this.startMic;
-      if (vid && !vid.paused && t - outLat > 0 && Math.abs(vid.currentTime - (t - outLat)) > 0.12) vid.currentTime = t - outLat;
       if (t - lagAt >= 2 && this.user.length > 100) {
         lagAt = t;
         const rec = this.user.filter((u) => u.t > t - 12), est = bestLag(this.song.mel.frames.filter((f) => f.t > t - 13 && f.t < t + 1), rec);
@@ -402,6 +470,8 @@ export class AlongView {
   // or a jump resets it, and nothing is taken in while the video isn't playing.
   async startYt() {
     const $ = this.$, S = this.app.settings, P = this.player;
+    // played first, still inside the tap: a phone lets sound start only there
+    try { P.seekTo(0, true); P.setPlaybackRate(1); P.playVideo(); } catch { /* the singer can press play */ }
     const eng = new AudioEngine(), pt = new PitchTracker(S);
     let an = null;
     this.user = []; this.result = null; this.mic = null; this.reviewT = null; $('alRes').innerHTML = '';
@@ -431,7 +501,6 @@ export class AlongView {
       const sorted = [...ds].sort((p, q) => p - q);
       this.startMic = -sorted[sorted.length >> 1]; // song time = microphone time − startMic
     }, 100);
-    try { P.seekTo(0, true); P.setPlaybackRate(1); P.playVideo(); } catch { /* the singer can press play */ }
     this.singing(eng);
     const tick = () => {
       if (this.eng !== eng) return;
