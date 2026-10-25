@@ -62,8 +62,8 @@ export class AlongView {
         <input class="al-url" id="alUrl" placeholder="${L('粘贴 YouTube 或 B站链接；其他网站：留空，点“① 分析”后到那个标签页播放', 'Paste a YouTube or Bilibili link; other sites: leave empty, press “① Analyse” and play it in its tab')}" />
         <button class="btn primary" id="alAna">${L('① 分析', '① Analyse')}</button>
         <span class="muted">${L('或', 'or')}</span>
-        <button class="btn" id="alPick">${L('导入歌曲文件', 'Import a song file')}</button>
-        <input type="file" id="alFile" accept="audio/*" class="hidden" />
+        <button class="btn" id="alPick">${L('导入歌曲 / 视频文件', 'Import a song / video file')}</button>
+        <input type="file" id="alFile" accept="audio/*,video/*" class="hidden" />
       </div>
       <div class="al-ytbox" id="alYtBox" hidden><div id="alYt"></div><div class="al-ytlock" id="alYtLock" hidden></div></div>
       <div class="al-sep" id="alSep"><span class="al-sep-t"></span><div class="bar"><div class="fill"></div></div></div>
@@ -107,7 +107,7 @@ export class AlongView {
     };
     $('alNow').innerHTML = this.nowHtml(null, null);
     this.cards = new VoiceCards($('alCards'), [{ key: 'ref', label: L('原唱', 'Original'), color: ALONG_COLORS.ref }, { key: 'user', label: L('你', 'You'), color: ALONG_COLORS.mine }], { sex: VOICE_TYPES[this.app.settings.voiceType]?.sex });
-    this.say(canCaptureTab() ? L('第一步：粘贴 YouTube / B站链接点“① 分析”（其他网站留空），或者导入歌曲文件（mp3、m4a、wav…）。', 'Step one: paste a YouTube / Bilibili link and press “① Analyse” (other sites: leave it empty), or import a song file (mp3, m4a, wav…).') : L('第一步：导入歌曲文件（mp3、m4a、wav…）。这个浏览器不能分析 YouTube（要电脑版 Chrome / Edge）。', 'Step one: import a song file (mp3, m4a, wav…). This browser can’t analyse YouTube (desktop Chrome / Edge needed).'));
+    this.say(canCaptureTab() ? L('第一步：粘贴 YouTube / B站链接点“① 分析”（其他网站留空），或者导入歌曲 / 视频文件（mp3、m4a、wav、mp4、mov…）。', 'Step one: paste a YouTube / Bilibili link and press “① Analyse” (other sites: leave it empty), or import a song / video file (mp3, m4a, wav, mp4, mov…).') : L('第一步：导入歌曲 / 视频文件（mp3、m4a、wav、mp4、mov…）。这个浏览器不能分析网页里的视频（要电脑版 Chrome / Edge）。', 'Step one: import a song / video file (mp3, m4a, wav, mp4, mov…). This browser can’t analyse videos on web pages (desktop Chrome / Edge needed).'));
     this.controls();
     this.draw();
   }
@@ -145,7 +145,7 @@ export class AlongView {
   async analyseYt(url) {
     const $ = this.$, id = videoIdOf(url);
     if (this.busy || this.eng) return;
-    if (!id) { this.say(L('这不是 YouTube 视频链接。其他网站的歌：下载成文件后点“导入歌曲文件”。', 'That isn’t a YouTube video link. Songs from other sites: save them as a file and use “Import a song file”.')); return; }
+    if (!id) { this.say(L('这不是 YouTube 视频链接。其他网站的歌：留空再点“① 分析”，或者存成文件后点“导入歌曲 / 视频文件”。', 'That isn’t a YouTube video link. Songs from other sites: leave it empty and press “① Analyse”, or save them as a file and use “Import a song / video file”.')); return; }
     let tab;
     try { ({ stream: tab } = await captureTabAudio({ currentTab: true })); } catch (err) {
       this.say(err.message === 'no-audio'
@@ -212,6 +212,7 @@ export class AlongView {
   // the previous song's player and shared sound let go
   dropSong() {
     this.song?.tab?.getTracks().forEach((k) => k.stop());
+    if (this.song?.video) URL.revokeObjectURL(this.song.video);
     this.player?.destroy?.(); this.player = null;
     const $ = this.$; $('alYt').innerHTML = ''; $('alYtBox').hidden = true;
   }
@@ -281,13 +282,19 @@ export class AlongView {
     this.busy = false; this.controls(); this.draw(0);
   }
 
-  // ① a song file: decoded, then analysed
+  // ① a song or video file: its sound decoded, then analysed. A video's
+  // picture is shown (muted) and kept in step with the sound while singing.
   async load(file) {
     const $ = this.$;
     if (this.busy || this.eng) return;
     this.busy = true; this.result = null; this.user = []; this.reviewT = null; $('alRes').innerHTML = '';
     this.dropSong();
     const song = (this.song = { name: file.name, mel: { frames: [], notes: [], secs: 0 } });
+    if (/^video\//.test(file.type) || /\.(mp4|m4v|mov|webm|mkv)$/i.test(file.name)) {
+      song.video = URL.createObjectURL(file);
+      $('alYtBox').hidden = false;
+      $('alYt').innerHTML = `<video src="${song.video}" playsinline muted preload="auto"></video>`;
+    }
     this.controls();
     this.say(L(`正在读取“${file.name}”…`, `Reading “${file.name}”…`));
     try {
@@ -304,8 +311,10 @@ export class AlongView {
       if (this.song !== song) return;
       this.say(L(`“${file.name}”分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音（用了 ${((performance.now() - t) / 1000).toFixed(0)} 秒）。戴上耳机，点“② 开始跟唱”。`, `“${file.name}” analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes (in ${((performance.now() - t) / 1000).toFixed(0)} s). Put on headphones and press “② Sing along”.`));
     } catch (err) {
-      if (this.song === song) this.song = null;
-      this.say(L(`分析不了这个文件：${err.message}`, `Can’t analyse this file: ${err.message}`));
+      if (this.song === song) { this.dropSong(); this.song = null; }
+      // decodeAudioData can't read every container (some .mkv, odd codecs)
+      const msg = /decod|EncodingError|Unable/i.test(`${err.name} ${err.message}`) ? L('读不出它的声音（换成 mp4 / mov / mp3 试试）', 'its sound can’t be read (try an mp4 / mov / mp3)') : err.message;
+      this.say(L(`分析不了这个文件：${msg}`, `Can’t analyse this file: ${msg}`));
     }
     this.busy = false; this.controls(); this.draw(0);
   }
@@ -344,12 +353,18 @@ export class AlongView {
     this.startMic = eng.now() + lead;
     this.lag = (ctx.outputLatency || 0) + (ctx.baseLatency || 0) + 0.03;
     src.onended = () => { if (this.eng === eng) this.stop(); };
+    // a video file: its picture, muted, follows the sound being heard (the
+    // song plays in the audio context; the picture is nudged back whenever it
+    // drifts over 0.12 s)
+    const vid = this.song.video ? this.root.querySelector('#alYt video') : null, outLat = ctx.outputLatency || 0;
+    if (vid) { vid.muted = true; vid.currentTime = 0; setTimeout(() => { if (this.eng === eng) vid.play().catch(() => {}); }, (lead + outLat) * 1000); }
     this.singing(eng);
     let lagAt = 0;
     const tick = () => {
       if (this.eng !== eng) return;
       // the delay, lined up again every 2 s on the last 12 s sung
       const t = eng.now() - this.startMic;
+      if (vid && !vid.paused && t - outLat > 0 && Math.abs(vid.currentTime - (t - outLat)) > 0.12) vid.currentTime = t - outLat;
       if (t - lagAt >= 2 && this.user.length > 100) {
         lagAt = t;
         const rec = this.user.filter((u) => u.t > t - 12), est = bestLag(this.song.mel.frames.filter((f) => f.t > t - 13 && f.t < t + 1), rec);
@@ -532,6 +547,7 @@ export class AlongView {
     clearInterval(this.vIv);
     try { this.src?.stop?.(); } catch { /* ended */ }
     try { if (this.song?.yt) this.player?.pauseVideo(); } catch { /* gone */ }
+    this.root.querySelector('#alYt video')?.pause();
     try { this.tabNode?.src.disconnect(); this.tabNode?.node.disconnect(); } catch { /* gone */ }
     this.tabNode = null;
     await eng.stop();
