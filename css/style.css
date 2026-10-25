@@ -397,8 +397,7 @@ ol.refs a:hover { text-decoration: underline; }
 .al-sep { display: flex; align-items: center; gap: 10px; height: 30px; margin: 4px 0 0; font-size: 12.5px; color: var(--text-2); }
 .al-sep-t { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .al-sep .bar { flex: 0 0 180px; visibility: hidden; }
-.al-sep .al-skip { flex: 0 0 auto; padding: 3px 10px; font-size: 12px; visibility: hidden; }
-.al-sep.busy .bar, .al-sep.busy .al-skip { visibility: visible; }
+.al-sep.busy .bar { visibility: visible; }
 .al-sep.ok { color: #6fdc6f; } .al-sep.warn { color: #f0b429; }
 @media (max-width: 640px) { .al-sep .bar { flex-basis: 80px; } }
 .al-tip { font-size: 13px; color: var(--text-2); margin: 6px 0 10px; min-height: 2.9em; line-height: 1.45; }
@@ -413,9 +412,13 @@ ol.refs a:hover { text-decoration: underline; }
 .al-table th { position: sticky; top: 0; background: var(--surface); color: var(--text-2); font-weight: 600; }
 .al-table tr.al-off td:last-child { color: #ff8a8a; } .al-table tr.al-near td:last-child { color: #f0b429; } .al-table tr.al-good td:last-child { color: #6fdc6f; } .al-table tr.al-missed td { color: var(--muted); }
 .al-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.al-src { margin: 4px 0 8px; }
 .al-yt { margin-bottom: 8px; }
 .al-ytin { display: flex; gap: 8px; margin-bottom: 8px; }
+.al-in { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 8px; }
+.al-in .al-url { flex: 1 1 280px; min-width: 0; }
+.al-in .btn:disabled, .al-controls .btn:disabled, .al-in input:disabled { opacity: 0.4; cursor: not-allowed; }
+.al-ytbox { position: relative; }
+.al-ytlock { position: absolute; inset: 0; z-index: 2; cursor: wait; background: rgba(12,15,22,0.08); }
 .al-url { flex: 1 1 auto; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 6px 10px; font-size: 13px; }
 .al-ytbox { width: 100%; max-width: 440px; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; overflow: hidden; }
 .al-ytbox iframe, .al-ytbox > div { width: 100%; height: 100%; border: 0; }

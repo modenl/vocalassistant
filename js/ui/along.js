@@ -1,11 +1,15 @@
-// "跟原唱唱" / Sing along: import the original song (a file, or a YouTube video
-// played in the page), sing along on headphones, and see the original's notes
-// and yours side by side, note names on both. The original's melody comes from
-// the song itself (MELODIA, see along/melody.js), not from the microphone — the
-// microphone hears only the singer. A YouTube player's sound can't be read by
-// the page: the singer shares the tab's sound through the browser's dialog
-// (along/tabcapture.js); its melody is extracted every 2 s while singing (so it
-// shows 1–2 s late) and once more over the whole take at the end.
+// "跟原唱唱" / Sing along. Two steps, in this order and no other:
+//   ① analyse the original — a YouTube video (played once at 1.5× by the
+//      page), a Bilibili video or a song on any other site (played once by the
+//      singer, only to be analysed: their sound shared from the tab), or a song
+//      file: Demucs separates the lead vocal, MELODIA follows it; meanwhile
+//      nothing on the page can be used;
+//   ② sing along on headphones: the original's notes (known in full ahead) and
+//      yours side by side, note names on both. Where the song is: the file's
+//      own clock, the YouTube player's time, or — for the players the page
+//      can't ask — the tab's sound matched against the recording (along/align.js).
+//      The microphone hears only the singer.
+// Nothing of the song is stored or sent anywhere.
 
 import { AudioEngine } from '../audio/engine.js';
 import { FrameAnalyzer } from '../dsp/analyzer.js';
@@ -13,13 +17,8 @@ import { PitchTracker } from '../analysis/pitch.js';
 import { decodeSong, extractMelody, resampleTo44k } from '../along/melody.js';
 import { separateVocals, releaseSeparator } from '../along/separate.js';
 import { AnalysisAnim } from '../viz/analysisAnim.js';
-
-// YouTube played faster once to analyse it ahead of singing: a synthetic song
-// with a known melody, played through the browser's own speed-up (pitch kept)
-// and captured: at 1× 95 % of moments right after Demucs + MELODIA, 1.5× 92 %,
-// 2× 74 % (Demucs was trained on music at its real tempo) — tools/speedtest.js
-const PRE_RATE = 1.5;
 import { videoIdOf, createPlayer, bilibiliEmbedOf } from '../along/youtube.js';
+import { features, locate, RATE as AL_RATE } from '../along/align.js';
 import { captureTabAudio, canCaptureTab } from '../along/tabcapture.js';
 import { VOICE_TYPES, midiName } from '../config.js';
 import { notesOf, bestLag, compareAlong, phrasesOf, coverOf } from '../along/compare.js';
@@ -30,6 +29,12 @@ import { vowelOf } from '../analysis/vowels.js';
 import { pitchNowHtml } from './pitchNow.js';
 import { L } from '../i18n.js';
 
+// A YouTube video is analysed from its sound played once, faster. A synthetic
+// song with a known melody, sped up by the browser (pitch kept), captured and
+// analysed (Demucs + MELODIA): 95 % of moments right at 1×, 92 % at 1.5×, 74 %
+// at 2× — Demucs was trained on music at its real tempo (tools/speedtest.js)
+const PRE_RATE = 1.5;
+
 const fmtT = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 const centsTxt = (c) => (c === 0 ? L('正好', 'spot on') : c > 0 ? L(`高 ${c} 音分`, `${c} cents sharp`) : L(`低 ${-c} 音分`, `${-c} cents flat`));
 const octTxt = (k) => (k === 0 ? '' : k < 0 ? L(`低 ${-k} 个八度`, `${-k} octave${k < -1 ? 's' : ''} lower`) : L(`高 ${k} 个八度`, `${k} octave${k > 1 ? 's' : ''} higher`));
@@ -39,10 +44,10 @@ export class AlongView {
   constructor(app, root) {
     this.app = app;
     this.root = root;
-    this.song = null;   // { name, buf, mel: { frames, notes, secs } }
+    this.song = null;   // { name, yt?, buf?, x?, mel: { frames, notes, secs }, vox?, ready }
     this.user = [];     // the singer's pitch: { t (song time), midi }
     this.result = null;
-    this.srcMode = 'file';  // where the original comes from: 'file' | 'yt'
+    this.busy = false;  // analysing: every control greyed out
     this.keyMode = 'auto';  // compare in: 'auto' | 'relative' (the singer's key) | 'absolute' (the original's)
   }
 
@@ -52,22 +57,21 @@ export class AlongView {
     this.rendered = true;
     this.root.innerHTML = `
       <div class="ph"><h3 style="font-size:16px">${L('跟原唱唱', 'Sing along')}</h3>
-        <span class="sub">${L('导入原唱，戴耳机跟着唱：蓝色是原唱的每个音，彩色线是你，两边都标音名（如 A3）', 'Import the original and sing along on headphones: blue = the original’s notes, the coloured line = you, note names on both (e.g. A3)')}</span></div>
-      <div class="seg al-src" id="alSrc"><span class="muted">${L('原唱来源', 'The original from')}</span>
-        <button data-src="file" class="on">${L('歌曲文件', 'A song file')}</button><button data-src="yt">${L('网页播放器（YouTube、B站…）', 'A web player (YouTube, Bilibili…)')}</button></div>
-      <div class="al-yt" id="alYtRow" hidden>
-        <div class="al-ytin"><input class="al-url" id="alUrl" placeholder="${L('粘贴 YouTube 或 B站视频链接；其他网站：在另一个标签页里播放，直接点“开始跟唱”', 'Paste a YouTube or Bilibili link; other sites: play it in another tab and just press “Sing along”')}" /><button class="btn" id="alYtLoad">${L('载入', 'Load')}</button><button class="btn primary" id="alPre" hidden>${L(`⚡ 预先分析（${PRE_RATE} 倍速放一遍）`, `⚡ Analyse first (play once at ${PRE_RATE}×)`)}</button></div>
-        <div class="al-ytbox"><div id="alYt"></div></div>
-        <p class="muted al-cap">${L('YouTube、B站的视频在这里播放；其他网站（网易云、QQ 音乐网页版等）就在另一个标签页里播放，把两个窗口并排放，边看这里边唱。点“开始跟唱”后，浏览器会弹出共享窗口：选正在放歌的那个标签页（这里的视频就选“这个标签页”），并打开“同时分享标签页音频”。程序要听到视频的声音才能找出原唱的旋律；声音只在内存里分析，不下载、不保存。只支持电脑版 Chrome / Edge。唱的时候原唱的音会晚 1–2 秒出现，唱完会对整段重新分析。', 'YouTube and Bilibili videos play here; for other sites (music sites and the like) play it in another tab and put the two windows side by side. After “Sing along” the browser asks what to share: pick the tab playing the music (“This tab” for a video here) and turn on “Also share tab audio”. The app needs to hear the video to find the original’s melody; the sound is analysed in memory only, never downloaded or stored. Desktop Chrome / Edge only. While singing the original’s notes show 1–2 s late; the whole take is analysed again at the end.')}</p>
-      </div>
-      <div class="live-controls al-controls">
-        <button class="btn" id="alPick">${L('导入原唱文件', 'Import the original')}</button>
+        <span class="sub">${L('先分析原唱，再戴耳机跟着唱：蓝色是原唱的每个音，彩色线是你，两边都标音名（如 A3）', 'Analyse the original first, then sing along on headphones: blue = the original’s notes, the coloured line = you, note names on both (e.g. A3)')}</span></div>
+      <div class="al-in">
+        <input class="al-url" id="alUrl" placeholder="${L('粘贴 YouTube 或 B站链接；其他网站：留空，点“① 分析”后到那个标签页播放', 'Paste a YouTube or Bilibili link; other sites: leave empty, press “① Analyse” and play it in its tab')}" />
+        <button class="btn primary" id="alAna">${L('① 分析', '① Analyse')}</button>
+        <span class="muted">${L('或', 'or')}</span>
+        <button class="btn" id="alPick">${L('导入歌曲文件', 'Import a song file')}</button>
         <input type="file" id="alFile" accept="audio/*" class="hidden" />
-        <button class="btn primary" id="alGo" disabled>${L('● 开始跟唱', '● Sing along')}</button>
-        <span class="status al-status" id="alStatus">${L('支持 mp3、m4a、wav 等歌曲文件。', 'mp3, m4a, wav and other song files.')}</span>
+      </div>
+      <div class="al-ytbox" id="alYtBox" hidden><div id="alYt"></div><div class="al-ytlock" id="alYtLock" hidden></div></div>
+      <div class="al-sep" id="alSep"><span class="al-sep-t"></span><div class="bar"><div class="fill"></div></div></div>
+      <div class="live-controls al-controls">
+        <button class="btn primary" id="alGo" disabled>${L('② 开始跟唱', '② Sing along')}</button>
+        <span class="status al-status" id="alStatus"></span>
         <div class="al-now" id="alNow"></div>
       </div>
-      <div class="al-sep" id="alSep"><span class="al-sep-t"></span><div class="bar"><div class="fill"></div></div><button class="btn al-skip">${L('跳过（按混音分析，较不准）', 'Skip (analyse the mix, less accurate)')}</button></div>
       <p class="al-tip" id="alTip">🎧 ${L('请戴耳机：原唱只从耳机里放，麦克风就只录到你。用音箱外放时，麦克风会同时录到原唱，结果不准。', 'Wear headphones: the original plays only in them, so the microphone hears only you. Played through speakers, the microphone records the original too and the result isn’t reliable.')}</p>
       <div class="panel">
         <div class="al-scroll" id="alScroll"><canvas class="viz" id="alView" style="height:320px"></canvas></div>
@@ -80,14 +84,16 @@ export class AlongView {
           <span><b style="color:${ALONG_COLORS.mine}">A3</b> ${L('橙字 = 你唱的音名', 'orange = the note you sang')}</span>
           <span><i style="background:rgba(154,163,181,0.45)"></i>${L('灰色 = 你没唱的地方，当作伴奏，不计分', 'grey = where you didn’t sing: taken as accompaniment, not scored')}</span>
         </div>
-        <p class="muted al-cap" id="alCap">${L('原唱的旋律：先用 Demucs 把人声从伴奏里分出来，再用 MELODIA 算法提取（Essentia.js）；分好之前先按混音提取，前奏、间奏里的乐器旋律可能被画出来，那几段不用跟。', 'The original’s melody: Demucs first separates the vocal from the band, then the MELODIA algorithm extracts it (Essentia.js); until that’s done the mix is used, and instrumental intros and solos may show up — no need to sing those.')}</p>
+        <p class="muted al-cap">${L(`分析怎么做：YouTube 视频以 ${PRE_RATE} 倍速放一遍，程序录下这个标签页的声音（浏览器会问你共享什么：选“这个标签页”，打开“同时分享标签页音频”；只支持电脑版 Chrome / Edge）；歌曲文件直接读。然后用 Demucs 把人声从伴奏里分出来，再用 MELODIA 算法提取原唱的旋律（Essentia.js），全在你的电脑上算，不上传、不保存。`, `How the analysis works: a YouTube video plays once at ${PRE_RATE}× while the app records this tab’s sound (the browser asks what to share: pick “This tab” and turn on “Also share tab audio”; desktop Chrome / Edge only); a song file is read directly. Demucs then separates the vocal from the band and the MELODIA algorithm extracts the original’s melody (Essentia.js) — all on your computer, nothing uploaded or stored.`)}</p>
         <h4 class="ls-h">${L('频谱对照：同一时刻的原唱和你', 'Spectra: the original and you at the same moment')}</h4>
         <canvas class="viz" id="alSpec" style="height:270px"></canvas>
         <div id="alCards"></div>
-        <p class="muted al-cap">${L('怎么看：粗竖线 F0 是基频，就是你听到的音高；连着各次谐波（F0 的 2 倍、3 倍……）的线是包络，它的形状由口腔喉咙决定。两条 F0 对齐 = 同一个音；低一个八度时，你的谐波密一倍，你的第 2 根谐波落在原唱的 F0 上（虚线），音名一样、只差八度。紫色 F1、F2 是共振峰——包络的前两个峰，决定元音，和音高无关（原唱混着伴奏，只用它旋律的谐波来估计，标 ≈）。蓝色区域 2–4 kHz 看共鸣：这一段的谐波比低频弱得越少，声音越亮、越有穿透力（好的歌声约 10–20 dB）。唱完以后，点上面音高图的任何位置，就显示那一刻。', 'How to read it: the thick line F0 is the fundamental — the pitch you hear; the line through the harmonics (2×, 3× F0 …) is the envelope, shaped by mouth and throat. F0s lined up = the same note; an octave lower, your harmonics are twice as dense and your 2nd sits on the original’s F0 (dashed) — the same note name, an octave apart. Purple F1, F2 are the formants — the envelope’s first two peaks, setting the vowel, not the pitch (for the original, mixed with the band, estimated from its melody’s harmonics: ≈). The blue 2–4 kHz band shows the ring: the less those harmonics fall below the lows, the brighter the voice carries (good singing ≈ 10–20 dB). After singing, click anywhere on the pitch chart above to see that moment.')}</p>
+        <p class="muted al-cap">${L('怎么看：粗竖线 F0 是基频，就是你听到的音高；连着各次谐波（F0 的 2 倍、3 倍……）的线是包络，它的形状由口腔喉咙决定。两条 F0 对齐 = 同一个音；低一个八度时，你的谐波密一倍，你的第 2 根谐波落在原唱的 F0 上（虚线），音名一样、只差八度。紫色 F1、F2 是共振峰——包络的前两个峰，决定元音，和音高无关（原唱的是从分出来的人声的谐波估计的，标 ≈）。蓝色区域 2–4 kHz 看共鸣：这一段的谐波比低频弱得越少，声音越亮、越有穿透力（好的歌声约 10–20 dB）。唱完以后，点上面音高图的任何位置，就显示那一刻。', 'How to read it: the thick line F0 is the fundamental — the pitch you hear; the line through the harmonics (2×, 3× F0 …) is the envelope, shaped by mouth and throat. F0s lined up = the same note; an octave lower, your harmonics are twice as dense and your 2nd sits on the original’s F0 (dashed) — the same note name, an octave apart. Purple F1, F2 are the formants — the envelope’s first two peaks, setting the vowel, not the pitch (for the original, estimated from the separated vocal’s harmonics: ≈). The blue 2–4 kHz band shows the ring: the less those harmonics fall below the lows, the brighter the voice carries (good singing ≈ 10–20 dB). After singing, click anywhere on the pitch chart above to see that moment.')}</p>
       </div>
       <div id="alRes"></div>`;
     const $ = (id) => this.root.querySelector('#' + id);
+    $('alAna').onclick = () => this.analyse($('alUrl').value);
+    $('alUrl').onkeydown = (e) => { if (e.key === 'Enter') this.analyse($('alUrl').value); };
     $('alPick').onclick = () => $('alFile').click();
     $('alFile').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) this.load(f); };
     $('alGo').onclick = () => (this.eng ? this.stop() : this.start());
@@ -99,68 +105,191 @@ export class AlongView {
       this.draw(null);
       this.drawSpectra(this.reviewT);
     };
-    $('alSrc').onclick = (e) => { const b = e.target.closest('[data-src]'); if (b && !this.eng) this.setSource(b.dataset.src); };
-    $('alYtLoad').onclick = () => this.loadYt($('alUrl').value);
-    $('alPre').onclick = () => (this.pre ? this.pre.stop() : this.preAnalyseYt());
-    $('alUrl').onkeydown = (e) => { if (e.key === 'Enter') this.loadYt($('alUrl').value); };
     $('alNow').innerHTML = this.nowHtml(null, null);
     this.cards = new VoiceCards($('alCards'), [{ key: 'ref', label: L('原唱', 'Original'), color: ALONG_COLORS.ref }, { key: 'user', label: L('你', 'You'), color: ALONG_COLORS.mine }], { sex: VOICE_TYPES[this.app.settings.voiceType]?.sex });
+    this.say(canCaptureTab() ? L('第一步：粘贴 YouTube / B站链接点“① 分析”（其他网站留空），或者导入歌曲文件（mp3、m4a、wav…）。', 'Step one: paste a YouTube / Bilibili link and press “① Analyse” (other sites: leave it empty), or import a song file (mp3, m4a, wav…).') : L('第一步：导入歌曲文件（mp3、m4a、wav…）。这个浏览器不能分析 YouTube（要电脑版 Chrome / Edge）。', 'Step one: import a song file (mp3, m4a, wav…). This browser can’t analyse YouTube (desktop Chrome / Edge needed).'));
+    this.controls();
     this.draw();
   }
 
   get $() { return (id) => this.root.querySelector('#' + id); }
+  say(t) { const el = this.root.querySelector('#alStatus'); if (el) el.textContent = t; }
 
-  setSource(src) {
-    const $ = this.$;
-    this.srcMode = src;
-    $('alSrc').querySelectorAll('[data-src]').forEach((b) => b.classList.toggle('on', b.dataset.src === src));
-    $('alYtRow').hidden = src !== 'yt';
-    $('alPick').hidden = src !== 'file';
-    // a web player: any tab can be shared, so singing along needs no link first
-    $('alGo').disabled = src === 'yt' ? !canCaptureTab() : !(this.song && !this.song.yt);
-    $('alStatus').textContent = src === 'yt'
-      ? (canCaptureTab() ? L('粘贴 YouTube / B站链接点“载入”，或者在另一个标签页里放歌，直接点“开始跟唱”。', 'Paste a YouTube / Bilibili link and press “Load”, or play the song in another tab and just press “Sing along”.') : L('这个浏览器不能共享标签页的声音：请用电脑版 Chrome 或 Edge。', 'This browser can’t share a tab’s sound: please use desktop Chrome or Edge.'))
-      : L('支持 mp3、m4a、wav 等歌曲文件。', 'mp3, m4a, wav and other song files.');
+  // Which controls can be used now: none while analysing; while singing only
+  // "stop"; singing only once a song is fully analysed.
+  controls() {
+    const $ = this.$, busy = this.busy, singing = !!this.eng;
+    $('alUrl').disabled = $('alAna').disabled = busy || singing || !canCaptureTab();
+    $('alPick').disabled = busy || singing;
+    $('alGo').disabled = busy || !(singing || this.song?.ready);
+    $('alYtLock').hidden = !busy;
   }
 
-  async loadYt(url) {
-    const $ = this.$, id = videoIdOf(url), bili = bilibiliEmbedOf(url);
-    if (bili) {
-      if (this.eng) await this.stop();
-      this.player?.destroy?.(); this.player = null;
-      $('alYt').innerHTML = `<iframe src="${bili}" allow="autoplay; fullscreen" referrerpolicy="no-referrer-when-downgrade"></iframe>`;
-      this.song = { name: 'Bilibili', yt: true, embedded: true, mel: { frames: [], notes: [], secs: 0 } };
-      this.user = []; this.result = null; this.mic = null; this.reviewT = null; $('alRes').innerHTML = '';
-      $('alPre').hidden = true;
-      $('alStatus').textContent = L('B站视频载入了。戴上耳机，点“开始跟唱”，共享“这个标签页”和音频，再点视频上的 ▶ 播放。', 'Bilibili video loaded. Put on headphones, press “Sing along”, share “This tab” with its audio, then press ▶ on the video.');
-      $('alGo').disabled = false;
-      this.draw(0);
+  // ① from a link: YouTube (the page plays it), Bilibili (embedded; the singer
+  // plays it), anything else (empty or another site: played in its own tab)
+  analyse(url) {
+    if (this.busy || this.eng) return;
+    const u = String(url || '').trim();
+    if (videoIdOf(u)) return this.analyseYt(u);
+    const bili = bilibiliEmbedOf(u);
+    if (bili) return this.analyseTab({ embed: bili });
+    if (u && !/^https?:\/\//i.test(u)) { this.say(L('这不像一个链接。YouTube / B站：粘贴视频链接；其他网站：留空。', 'That doesn’t look like a link. YouTube / Bilibili: paste the video link; other sites: leave it empty.')); return; }
+    return this.analyseTab({});
+  }
+
+  // ① a YouTube video: share this tab's sound (asked first: the browser only
+  // allows it right after a click), load the player, play it once at 1.5×
+  // while recording, then the same analysis as a song file. Song time = the
+  // video's own time: a straight line fitted to (seconds recorded,
+  // player.getCurrentTime()) pairs maps the recording onto it.
+  async analyseYt(url) {
+    const $ = this.$, id = videoIdOf(url);
+    if (this.busy || this.eng) return;
+    if (!id) { this.say(L('这不是 YouTube 视频链接。其他网站的歌：下载成文件后点“导入歌曲文件”。', 'That isn’t a YouTube video link. Songs from other sites: save them as a file and use “Import a song file”.')); return; }
+    let tab;
+    try { ({ stream: tab } = await captureTabAudio({ currentTab: true })); } catch (err) {
+      this.say(err.message === 'no-audio'
+        ? L('没有拿到声音：在共享窗口里选“这个标签页”，并打开“同时分享标签页音频”，再点一次“① 分析”。', 'Didn’t get any sound: in the share dialog pick “This tab” and turn on “Also share tab audio”, then press “① Analyse” again.')
+        : L('没有共享这个标签页的声音（取消了？）。分析要听到视频的声音：再点一次“① 分析”，在弹窗里选“这个标签页”。', 'This tab’s sound wasn’t shared (cancelled?). The analysis needs to hear the video: press “① Analyse” again and pick “This tab”.'));
       return;
     }
-    if (!id) { $('alPre').hidden = true; this.player?.destroy?.(); this.player = null; $('alYt').innerHTML = ''; if (this.song?.yt) this.song = null; $('alStatus').textContent = L('这个链接不能嵌入（只支持 YouTube、B站）：请在另一个标签页里播放它，然后直接点“开始跟唱”，在共享窗口里选那个标签页。', 'This link can’t be embedded (YouTube and Bilibili only): play it in another tab, then press “Sing along” and pick that tab in the share dialog.'); return; }
-    if (this.eng) await this.stop();
-    $('alGo').disabled = true; $('alRes').innerHTML = '';
-    $('alStatus').textContent = L('正在载入 YouTube 播放器…', 'Loading the YouTube player…');
+    this.dropSong();
+    this.busy = true; this.result = null; this.user = []; this.reviewT = null; $('alRes').innerHTML = '';
+    const song = (this.song = { name: `YouTube ${id}`, yt: true, mel: { frames: [], notes: [], secs: 0 } });
+    this.controls();
+    const fail = (t) => { tab.getTracks().forEach((k) => k.stop()); this.busy = false; if (this.song === song) this.song = null; this.say(t); this.controls(); this.draw(0); };
+    this.say(L('正在载入视频…', 'Loading the video…'));
     try {
       this.player?.destroy?.();
+      $('alYtBox').hidden = false;
       $('alYt').innerHTML = '<div id="alYtEl"></div>';
       this.player = await createPlayer($('alYtEl'), id);
-      this.song = { name: `YouTube ${id}`, yt: true, embedded: true, mel: { frames: [], notes: [], secs: 0 } };
-      this.user = []; this.result = null;
-      $('alPre').hidden = false;
-      $('alStatus').textContent = L(`视频载入了。建议先点“⚡ 预先分析”：视频以 ${PRE_RATE} 倍速放一遍（你会听到），分析好以后跟唱时原唱的音提前显示、不再晚 1–2 秒。也可以直接点“开始跟唱”。`, `Video loaded. Best press “⚡ Analyse first”: the video plays once at ${PRE_RATE}× (you’ll hear it); then while singing the original’s notes show ahead instead of 1–2 s late. Or just press “Sing along”.`);
-      $('alGo').disabled = false;
-    } catch (err) {
-      $('alStatus').textContent = L(`YouTube 载入失败：${err.message}`, `YouTube didn’t load: ${err.message}`);
-    }
-    this.draw(0);
+    } catch (err) { fail(L(`视频载入失败：${err.message}`, `The video didn’t load: ${err.message}`)); return; }
+    const P = this.player, ctx = new AudioContext();
+    await ctx.audioWorklet.addModule(new URL('../audio/capture-worklet.js', import.meta.url));
+    const src = ctx.createMediaStreamSource(tab), node = new AudioWorkletNode(ctx, 'vocal-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' }), sink = ctx.createGain();
+    sink.gain.value = 0; src.connect(node); node.connect(sink).connect(ctx.destination);
+    const rate = (P.getAvailablePlaybackRates?.() || [1]).includes(PRE_RATE) ? PRE_RATE : 1;
+    const dur = P.getDuration?.() || 0, chunks = [], marks = [];
+    let n = 0, ended = null;
+    const done = new Promise((r) => { ended = r; });
+    // the analysis animation, from the recording on
+    const scroll = $('alScroll'), acv = $('alAnim');
+    scroll.style.display = 'none'; acv.style.display = '';
+    const anim = (this.anim = new AnalysisAnim(acv));
+    anim.capturing(Math.max(10, dur / rate), rate); anim.start();
+    node.port.onmessage = (e) => { if (P.getPlayerState?.() !== 1) return; chunks.push(e.data); n += e.data.length; anim.feed(e.data, ctx.sampleRate); };
+    const iv = setInterval(() => {
+      if (P.getPlayerState?.() === 1) marks.push([n / ctx.sampleRate, P.getCurrentTime()]);
+      if (P.getPlayerState?.() === 0 || (dur && P.getCurrentTime() >= dur - 0.2)) ended();
+    }, 100);
+    tab.getAudioTracks()[0].onended = () => ended();
+    const box = $('alSep');
+    box.className = 'al-sep busy'; box.querySelector('.al-sep-t').textContent = L(`第 1 步：视频以 ${rate} 倍速放一遍，录下它的声音（只在内存里）`, `Step 1: the video plays once at ${rate}× while its sound is recorded (in memory only)`);
+    this.say(L(`正在分析，请稍候，分析完才能开始唱（一首 4 分钟的歌约 ${Math.round(4 / rate + 1.5)} 分钟）…`, `Analysing — please wait; singing starts once it’s done (about ${Math.round(4 / rate + 1.5)} min for a 4-minute song)…`));
+    try { P.seekTo(0, true); P.setPlaybackRate(rate); P.playVideo(); } catch { /* it will be caught by the timeout below */ }
+    const fillIv = setInterval(() => { box.querySelector('.fill').style.width = `${Math.round(100 * Math.min(1, (n / ctx.sampleRate) / Math.max(1, dur / rate)))}%`; }, 250);
+    // a video that never starts (blocked autoplay, an embed refused by its owner)
+    const stall = setTimeout(() => { if (n === 0) ended(); }, 12000);
+    await done;
+    clearInterval(iv); clearInterval(fillIv); clearTimeout(stall);
+    try { P.pauseVideo(); P.setPlaybackRate(1); P.seekTo(0, true); } catch { /* gone */ }
+    tab.getTracks().forEach((k) => k.stop()); ctx.close();
+    if (this.song !== song) { anim.stop(); return; }
+    if (n < ctx.sampleRate * 5) { anim.stop(); scroll.style.display = ''; acv.style.display = 'none'; box.className = 'al-sep warn'; box.querySelector('.al-sep-t').textContent = ''; fail(L('没录到视频的声音：视频没放起来，或者共享时没打开“同时分享标签页音频”。再点一次“① 分析”。', 'The video’s sound wasn’t recorded: it didn’t play, or “Also share tab audio” was off. Press “① Analyse” again.')); return; }
+    // video time = a + b · seconds recorded
+    const k = marks.length, sx = marks.reduce((q, p) => q + p[0], 0) / Math.max(1, k), sy = marks.reduce((q, p) => q + p[1], 0) / Math.max(1, k);
+    const den = marks.reduce((q, p) => q + (p[0] - sx) ** 2, 0), b = k > 5 && den > 0 ? marks.reduce((q, p) => q + (p[0] - sx) * (p[1] - sy), 0) / den : rate, a = sy - b * sx;
+    const x = new Float32Array(n); chunks.forEach((c, i) => x.set(c, i * c.length));
+    try {
+      const mel = await this.analyseSong(song, await resampleTo44k(x, ctx.sampleRate), { offset: a, rate, scale: b });
+      if (this.song !== song) return;
+      this.say(L(`分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音。戴上耳机，点“② 开始跟唱”（视频从头原速播放）。`, `Analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes. Put on headphones and press “② Sing along” (the video plays from the start, normal speed).`));
+    } catch (err) { if (this.song === song) this.song = null; this.say(L(`分析失败：${err.message}。再点一次“① 分析”。`, `The analysis failed: ${err.message}. Press “① Analyse” again.`)); }
+    this.busy = false; this.controls(); this.draw(0);
   }
 
+  // the previous song's player and shared sound let go
+  dropSong() {
+    this.song?.tab?.getTracks().forEach((k) => k.stop());
+    this.player?.destroy?.(); this.player = null;
+    const $ = this.$; $('alYt').innerHTML = ''; $('alYtBox').hidden = true;
+  }
+
+  // ① a song on Bilibili or any other site: the singer plays it once, from the
+  // start at normal speed, only to be analysed. Recording starts with the first
+  // sound and ends after 4 s of silence (or when the sharing stops); the shared
+  // sound is kept for singing along (no second dialog), with the recording's
+  // features to find where the song is (along/align.js).
+  async analyseTab({ embed = null }) {
+    const $ = this.$;
+    let tab;
+    try { ({ stream: tab } = await captureTabAudio({ currentTab: !!embed })); } catch (err) {
+      this.say(err.message === 'no-audio'
+        ? L(`没有拿到声音：在共享窗口里选${embed ? '“这个标签页”' : '正在放歌的那个标签页'}，并打开“同时分享标签页音频”，再点一次“① 分析”。`, `Didn’t get any sound: in the share dialog pick ${embed ? '“This tab”' : 'the tab playing the song'} and turn on “Also share tab audio”, then press “① Analyse” again.`)
+        : L('没有共享标签页的声音（取消了？）。分析要听到歌：再点一次“① 分析”，在弹窗里选标签页。', 'The tab’s sound wasn’t shared (cancelled?). The analysis needs to hear the song: press “① Analyse” again and pick the tab.'));
+      return;
+    }
+    this.dropSong();
+    this.busy = true; this.result = null; this.user = []; this.reviewT = null; $('alRes').innerHTML = '';
+    const song = (this.song = { name: embed ? 'Bilibili' : L('另一个标签页', 'another tab'), mel: { frames: [], notes: [], secs: 0 } });
+    if (embed) { $('alYtBox').hidden = false; $('alYt').innerHTML = `<iframe src="${embed}" allow="autoplay; fullscreen" referrerpolicy="no-referrer-when-downgrade"></iframe>`; }
+    this.controls();
+    $('alYtLock').hidden = true; // the singer presses play in it
+    const ctx = new AudioContext();
+    await ctx.audioWorklet.addModule(new URL('../audio/capture-worklet.js', import.meta.url));
+    const src = ctx.createMediaStreamSource(tab), node = new AudioWorkletNode(ctx, 'vocal-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' }), sink = ctx.createGain();
+    sink.gain.value = 0; src.connect(node); node.connect(sink).connect(ctx.destination);
+    const sr = ctx.sampleRate, chunks = [];
+    let n = 0, quiet = 0, ended = null;
+    const done = new Promise((r) => { ended = r; });
+    const scroll = $('alScroll'), acv = $('alAnim');
+    scroll.style.display = 'none'; acv.style.display = '';
+    const anim = (this.anim = new AnalysisAnim(acv));
+    anim.capturing(null, 1); anim.start();
+    node.port.onmessage = (e) => {
+      const b = e.data; let p = 0;
+      for (let i = 0; i < b.length; i++) p += b[i] * b[i];
+      const loud = 10 * Math.log10(p / b.length + 1e-12) > -55;
+      if (!n && !loud) return; // waiting for it to start
+      chunks.push(b); n += b.length; anim.feed(b, sr);
+      quiet = loud ? 0 : quiet + b.length;
+      if ((n > 10 * sr && quiet > 4 * sr) || n > 20 * 60 * sr) ended();
+    };
+    tab.getAudioTracks()[0].onended = () => ended();
+    const box = $('alSep');
+    box.className = 'al-sep busy'; box.querySelector('.al-sep-t').textContent = L('第 1 步：录下原曲（只在内存里）', 'Step 1: recording the song (in memory only)');
+    box.querySelector('.fill').style.width = '0%';
+    this.say(embed ? L('现在点视频上的 ▶，从头原速播放一遍——只是给程序分析，不用唱。播完停 4 秒会自动结束，之后才能唱。', 'Now press ▶ on the video and play it once from the start at normal speed — only for the analysis, don’t sing yet. It ends by itself after 4 s of silence; then you can sing.')
+      : L('现在切到正在放歌的那个标签页，从头原速播放一遍——只是给程序分析，不用唱。播完停 4 秒会自动结束，之后才能唱。', 'Now go to the tab with the song and play it once from the start at normal speed — only for the analysis, don’t sing yet. It ends by itself after 4 s of silence; then you can sing.'));
+    await done;
+    node.port.onmessage = null; ctx.close();
+    if (this.song !== song) { anim.stop(); tab.getTracks().forEach((k) => k.stop()); return; }
+    const fail = (t) => { anim.stop(); scroll.style.display = ''; acv.style.display = 'none'; box.className = 'al-sep'; box.querySelector('.al-sep-t').textContent = ''; tab.getTracks().forEach((k) => k.stop()); this.song = null; this.busy = false; this.say(t); this.controls(); this.draw(0); };
+    // the silence at the end isn't part of the song
+    const keep = Math.max(0, n - quiet + Math.round(0.5 * sr));
+    if (keep < 5 * sr) { fail(L('没录到歌（不到 5 秒）：没放起来，或者共享时没打开“同时分享标签页音频”。再点一次“① 分析”。', 'No song recorded (under 5 s): it didn’t play, or “Also share tab audio” was off. Press “① Analyse” again.')); return; }
+    const x = new Float32Array(n); chunks.forEach((c, i) => x.set(c, i * c.length));
+    const x44 = await resampleTo44k(x.subarray(0, keep), sr);
+    song.align = features(x44, 44100); // to find the song again while singing
+    song.tab = tab;
+    try {
+      const mel = await this.analyseSong(song, x44);
+      if (this.song !== song) return;
+      this.say(L(`分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音。戴上耳机，点“② 开始跟唱”，再从头播放（原速）——程序会自己听出播到哪里。`, `Analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes. Put on headphones, press “② Sing along”, then play it from the start (normal speed) — the app hears where it is.`));
+    } catch (err) { if (this.song === song) { tab.getTracks().forEach((k) => k.stop()); this.song = null; } this.say(L(`分析失败：${err.message}。再点一次“① 分析”。`, `The analysis failed: ${err.message}. Press “① Analyse” again.`)); }
+    this.busy = false; this.controls(); this.draw(0);
+  }
+
+  // ① a song file: decoded, then analysed
   async load(file) {
     const $ = this.$;
-    if (this.eng) await this.stop();
-    $('alGo').disabled = true; $('alRes').innerHTML = '';
-    $('alStatus').textContent = L(`正在读取“${file.name}”…`, `Reading “${file.name}”…`);
+    if (this.busy || this.eng) return;
+    this.busy = true; this.result = null; this.user = []; this.reviewT = null; $('alRes').innerHTML = '';
+    this.dropSong();
+    const song = (this.song = { name: file.name, mel: { frames: [], notes: [], secs: 0 } });
+    this.controls();
+    this.say(L(`正在读取“${file.name}”…`, `Reading “${file.name}”…`));
     try {
       const tmp = new AudioContext();
       const { buf, x } = await decodeSong(file, tmp);
@@ -168,29 +297,29 @@ export class AlongView {
       let peak = 0;
       for (let i = 0; i < x.length; i += 31) peak = Math.max(peak, Math.abs(x[i]));
       if (peak < 1e-4) throw new Error(L('文件里没有声音', 'the file is silent'));
-      const t = performance.now(), song = { name: file.name, buf, x, sr: 44100, mel: { frames: [], notes: [], secs: 0 } };
-      this.song = song;
-      $('alStatus').textContent = L(`正在分析“${file.name}”…`, `Analysing “${file.name}”…`);
-      const mel = await this.analyseSong(song, x, 0);
+      Object.assign(song, { buf, x, sr: 44100 });
+      const t = performance.now();
+      this.say(L('正在分析，请稍候，分析完才能开始唱…', 'Analysing — please wait; singing starts once it’s done…'));
+      const mel = await this.analyseSong(song, x);
       if (this.song !== song) return;
-      if (mel.notes.length < 3) throw new Error(L('找不到明显的旋律（纯伴奏、打击乐或说话？）', 'no clear melody (backing only, percussion or speech?)'));
-      this.user = []; this.result = null;
-      $('alStatus').textContent = L(`“${file.name}”：${fmtT(mel.secs)}，找到 ${mel.notes.length} 个旋律音（分析用了 ${((performance.now() - t) / 1000).toFixed(0)} 秒）。戴上耳机，点“开始跟唱”。`, `“${file.name}”: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes found (analysed in ${((performance.now() - t) / 1000).toFixed(0)} s). Put on headphones and press “Sing along”.`);
-      $('alGo').disabled = false;
+      this.say(L(`“${file.name}”分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音（用了 ${((performance.now() - t) / 1000).toFixed(0)} 秒）。戴上耳机，点“② 开始跟唱”。`, `“${file.name}” analysed: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes (in ${((performance.now() - t) / 1000).toFixed(0)} s). Put on headphones and press “② Sing along”.`));
     } catch (err) {
-      this.song = null;
-      $('alStatus').textContent = L(`读不了这个文件：${err.message}`, `Can’t read this file: ${err.message}`);
+      if (this.song === song) this.song = null;
+      this.say(L(`分析不了这个文件：${err.message}`, `Can’t analyse this file: ${err.message}`));
     }
-    this.draw(0);
+    this.busy = false; this.controls(); this.draw(0);
   }
 
+  // ② singing along (only with a song fully analysed)
   async start() {
-    const $ = this.$, S = this.app.settings;
-    // a web player with nothing embedded: the music plays in another tab
-    if (this.srcMode === 'yt' && !this.song?.embedded) this.song = { name: L('另一个标签页', 'another tab'), yt: true, embedded: false, mel: { frames: [], notes: [], secs: 0 } };
-    if (!this.song) return;
-    if (this.song.yt) return this.startYt();
+    if (!this.song?.ready || this.busy || this.eng) return;
     if (this.app.live?.engine.running) { alert(L('请先结束“唱一段看问题”页面的录音。', 'Please stop the recording on the “Sing & check” page first.')); return; }
+    return this.song.yt ? this.startYt() : this.song.align ? this.startTab() : this.startFile();
+  }
+
+  // a song file plays in the microphone's own audio context
+  async startFile() {
+    const $ = this.$, S = this.app.settings;
     const eng = new AudioEngine(), pt = new PitchTracker(S);
     let an = null;
     this.user = []; this.result = null; this.mic = null; this.reviewT = null; $('alRes').innerHTML = '';
@@ -204,6 +333,7 @@ export class AlongView {
     try { await eng.startMic({ deviceId: S.deviceId, record: false }); } catch (err) { alert(L(`麦克风错误：${err.message}`, `Microphone error: ${err.message}`)); return; }
     an = new FrameAnalyzer(eng.sampleRate);
     this.eng = eng;
+    this.controls();
     // the song plays in the same audio context: its start on the microphone's
     // clock is known; the rest of the delay (headphones, microphone) is found
     // afterwards by lining the two pitch tracks up
@@ -214,9 +344,7 @@ export class AlongView {
     this.startMic = eng.now() + lead;
     this.lag = (ctx.outputLatency || 0) + (ctx.baseLatency || 0) + 0.03;
     src.onended = () => { if (this.eng === eng) this.stop(); };
-    $('alGo').textContent = L('■ 停止', '■ Stop'); $('alGo').classList.add('recording');
-    $('alStatus').textContent = L('正在跟唱…', 'Singing along…');
-    this.showHeadsetTip(eng);
+    this.singing(eng);
     let lagAt = 0;
     const tick = () => {
       if (this.eng !== eng) return;
@@ -227,145 +355,17 @@ export class AlongView {
         const rec = this.user.filter((u) => u.t > t - 12), est = bestLag(this.song.mel.frames.filter((f) => f.t > t - 13 && f.t < t + 1), rec);
         if (est.share >= 0.3) this.lag = est.lag;
       }
-      const now = t - this.lag;
-      this.draw(now);
-      if (!this.specAt || performance.now() - this.specAt > 100) { this.specAt = performance.now(); this.drawSpectra(now - 0.06); }
-      $('alNow').innerHTML = this.nowHtml(this.refAt(now), this.last?.voiced ? this.last.f0 : 0);
+      this.frame(t - this.lag);
       this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
   }
 
-  // YouTube: the tab's sound comes in beside the microphone, on one clock
-  async startYt() {
-    const $ = this.$, S = this.app.settings;
-    if (this.app.live?.engine.running) { alert(L('请先结束“唱一段看问题”页面的录音。', 'Please stop the recording on the “Sing & check” page first.')); return; }
-    if (this.song.pre && this.player) return this.startPre();
-    let tab;
-    try { ({ stream: tab } = await captureTabAudio({ currentTab: this.song.embedded })); } catch (err) {
-      $('alStatus').textContent = err.message === 'no-audio'
-        ? L('没有拿到声音：在共享窗口里选正在放歌的标签页（这里的视频就选“这个标签页”），并打开“同时分享标签页音频”。', 'Didn’t get any sound: in the share dialog pick the tab playing the music (“This tab” for a video here) and turn on “Also share tab audio”.')
-        : L('没有共享标签页的声音（取消了，或这个浏览器不支持；请用电脑版 Chrome / Edge）。', 'The tab’s sound wasn’t shared (cancelled, or not supported here; use desktop Chrome / Edge).');
-      return;
-    }
-    const eng = new AudioEngine(), pt = new PitchTracker(S);
-    let an = null;
-    this.user = []; this.result = null; this.mic = null; this.reviewT = null; $('alRes').innerHTML = '';
-    this.song.mel = { frames: [], notes: [], secs: 0 };
-    this.startMic = null;
-    eng.onFrame = (frame, t) => {
-      if (!an || this.eng !== eng || this.startMic == null) return;
-      const st = pt.update(an.analyze(frame, { gateDb: S.gateDb, pitchOnly: true }), t);
-      this.last = st;
-      this.keepMic(frame, t, eng.sampleRate);
-      if (st.voiced) this.user.push({ t: t - this.startMic, midi: st.midi });
-    };
-    try { await eng.startMic({ deviceId: S.deviceId, record: false }); } catch (err) { tab.getTracks().forEach((t) => t.stop()); alert(L(`麦克风错误：${err.message}`, `Microphone error: ${err.message}`)); return; }
-    an = new FrameAnalyzer(eng.sampleRate);
-    this.eng = eng;
-    const ctx = eng.ctx, src = ctx.createMediaStreamSource(tab), node = new AudioWorkletNode(ctx, 'vocal-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' }), sink = ctx.createGain();
-    sink.gain.value = 0; src.connect(node); node.connect(sink).connect(ctx.destination);
-    this.startMic = eng.now();
-    // tab time 0 (its first sample) on the singer's clock: set by the first block
-    const T = this.tab = { stream: tab, node, src, sr: ctx.sampleRate, chunks: [], offset: null };
-    node.port.onmessage = (e) => { if (this.eng !== eng) return; if (T.offset == null) T.offset = eng.now() - e.data.length / T.sr - this.startMic; T.chunks.push(e.data); };
-    tab.getAudioTracks()[0].onended = () => { if (this.eng === eng) this.stop(); };
-    this.lag = (ctx.outputLatency || 0) + 0.03;
-    try { this.player?.playVideo(); } catch { /* the singer can press play */ }
-    this.melIv = setInterval(() => this.rollingMelody(), 2000);
-    $('alGo').textContent = L('■ 停止', '■ Stop'); $('alGo').classList.add('recording');
-    $('alStatus').textContent = L('正在跟唱…（原唱的音会晚 1–2 秒出现）', 'Singing along… (the original’s notes show 1–2 s late)');
-    this.showHeadsetTip(eng);
-    this.liveRange = null;
-    const tick = () => {
-      if (this.eng !== eng) return;
-      const now = eng.now() - this.startMic - this.lag;
-      this.draw(now);
-      if (!this.specAt || performance.now() - this.specAt > 100) { this.specAt = performance.now(); const at = this.knownAt(now - 0.06); this.drawSpectra(at, { late: now - 0.06 - at }); }
-      $('alNow').innerHTML = this.nowHtml(this.refAt(now), this.last?.voiced ? this.last.f0 : 0);
-      this.raf = requestAnimationFrame(tick);
-    };
-    this.raf = requestAnimationFrame(tick);
-  }
-
-  // From a tab the original's melody is worked out every 2 s, so the live moment
-  // has none yet: the spectra show the latest moment whose melody is known (up
-  // to 6 s back), so the original's F0, F1, F2 can be drawn at all.
-  knownAt(t) {
-    const fr = this.song?.mel.frames || [], last = fr.length ? fr[fr.length - 1].t : -Infinity;
-    return t - last > 0.1 && t - last <= 6 ? last : t;
-  }
-
-  // YouTube analysed ahead: the video plays once at PRE_RATE× while this tab's
-  // sound is recorded (the singer shares it, as for singing along), then the
-  // same analysis as a song file. Song time = the video's own time: a straight
-  // line fitted to (seconds recorded, player.getCurrentTime()) pairs maps the
-  // recording onto it. Press again to stop early (the part heard is analysed).
-  async preAnalyseYt() {
-    const $ = this.$, P = this.player, song = this.song;
-    if (!P || !song?.embedded || this.eng || this.pre) return;
-    let tab;
-    try { ({ stream: tab } = await captureTabAudio({ currentTab: true })); } catch (err) {
-      $('alStatus').textContent = err.message === 'no-audio'
-        ? L('没有拿到声音：在共享窗口里选“这个标签页”，并打开“同时分享标签页音频”。', 'Didn’t get any sound: pick “This tab” in the share dialog and turn on “Also share tab audio”.')
-        : L('没有共享标签页的声音（取消了，或这个浏览器不支持；请用电脑版 Chrome / Edge）。', 'The tab’s sound wasn’t shared (cancelled, or not supported here; use desktop Chrome / Edge).');
-      return;
-    }
-    const ctx = new AudioContext();
-    await ctx.audioWorklet.addModule(new URL('../audio/capture-worklet.js', import.meta.url));
-    const src = ctx.createMediaStreamSource(tab), node = new AudioWorkletNode(ctx, 'vocal-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' }), sink = ctx.createGain();
-    sink.gain.value = 0; src.connect(node); node.connect(sink).connect(ctx.destination);
-    const rates = P.getAvailablePlaybackRates?.() || [1], rate = rates.includes(PRE_RATE) ? PRE_RATE : 1;
-    const dur = P.getDuration?.() || 0, chunks = [], marks = [];
-    let n = 0, ended = null;
-    const done = new Promise((r) => { ended = r; });
-    // the analysis animation, from the recording on
-    const scroll = this.root.querySelector('#alScroll'), acv = this.root.querySelector('#alAnim');
-    scroll.style.display = 'none'; acv.style.display = '';
-    const anim = (this.anim = new AnalysisAnim(acv));
-    anim.capturing(Math.max(10, dur / rate), rate); anim.start();
-    node.port.onmessage = (e) => { if (P.getPlayerState?.() !== 1) return; chunks.push(e.data); n += e.data.length; anim.feed(e.data, ctx.sampleRate); };
-    const iv = setInterval(() => {
-      if (P.getPlayerState?.() === 1) marks.push([n / ctx.sampleRate, P.getCurrentTime()]);
-      if (P.getPlayerState?.() === 0 || (dur && P.getCurrentTime() >= dur - 0.2)) ended();
-    }, 100);
-    tab.getAudioTracks()[0].onended = () => ended();
-    this.pre = { stop: () => ended() };
-    $('alPre').textContent = L('■ 停止，分析已录到的部分', '■ Stop, analyse what’s recorded'); $('alGo').disabled = true; $('alRes').innerHTML = '';
-    $('alStatus').textContent = L(`正在以 ${rate} 倍速放一遍并录下来…`, `Playing it once at ${rate}× and recording…`);
-    const box = this.root.querySelector('#alSep');
-    box.className = 'al-sep busy'; box.querySelector('.al-sep-t').textContent = L(`第 1 步：${rate} 倍速录下原曲（只在内存里，不保存）`, `Step 1: recording the original at ${rate}× (in memory only, not stored)`);
-    try { P.seekTo(0, true); P.setPlaybackRate(rate); P.playVideo(); } catch { /* the singer can press play */ }
-    const fillIv = setInterval(() => { box.querySelector('.fill').style.width = `${Math.round(100 * Math.min(1, (n / ctx.sampleRate) / Math.max(1, dur / rate)))}%`; }, 250);
-    await done;
-    clearInterval(iv); clearInterval(fillIv);
-    this.pre = null;
-    $('alPre').textContent = L(`⚡ 预先分析（${PRE_RATE} 倍速放一遍）`, `⚡ Analyse first (play once at ${PRE_RATE}×)`);
-    try { P.pauseVideo(); P.setPlaybackRate(1); P.seekTo(0, true); } catch { /* gone */ }
-    tab.getTracks().forEach((t) => t.stop()); ctx.close();
-    if (this.song !== song) { anim.stop(); return; }
-    // video time = a + b · seconds recorded
-    const k = marks.length, sx = marks.reduce((q, p) => q + p[0], 0) / Math.max(1, k), sy = marks.reduce((q, p) => q + p[1], 0) / Math.max(1, k);
-    const den = marks.reduce((q, p) => q + (p[0] - sx) ** 2, 0), b = k > 5 && den > 0 ? marks.reduce((q, p) => q + (p[0] - sx) * (p[1] - sy), 0) / den : rate, a = sy - b * sx;
-    if (n < ctx.sampleRate * 5) { anim.stop(); scroll.style.display = ''; acv.style.display = 'none'; $('alStatus').textContent = L('录到的声音太短（不到 5 秒）：没放起来，或者没共享标签页音频。', 'Too little was recorded (under 5 s): the video didn’t play, or the tab’s audio wasn’t shared.'); $('alGo').disabled = false; return; }
-    const x = new Float32Array(n); chunks.forEach((c, i) => x.set(c, i * c.length));
-    $('alStatus').textContent = L('正在分析…', 'Analysing…');
-    try {
-      const mel = await this.analyseSong(song, await resampleTo44k(x, ctx.sampleRate), { offset: a, rate, scale: b });
-      if (this.song !== song) return;
-      song.pre = true;
-      $('alStatus').textContent = L(`预先分析好了：${fmtT(mel.secs)}，${mel.notes.length} 个旋律音。戴上耳机，点“开始跟唱”（从头开始，原速）。`, `Analysed ahead: ${fmtT(mel.secs)}, ${mel.notes.length} melody notes. Put on headphones and press “Sing along” (from the start, normal speed).`);
-    } catch (err) { $('alStatus').textContent = L(`分析失败：${err.message}`, `Analysis failed: ${err.message}`); }
-    $('alGo').disabled = false;
-    this.draw(0);
-  }
-
-  // Singing along with a YouTube video analysed ahead: no tab sharing, the
-  // whole melody known, song time = the video's time. The microphone's clock is
+  // A YouTube video: song time = the video's time. The microphone's clock is
   // mapped onto it with the median of (player time − microphone time) over the
   // last 1.5 s while playing (the player's time comes in coarse steps); a pause
   // or a jump resets it, and nothing is taken in while the video isn't playing.
-  async startPre() {
+  async startYt() {
     const $ = this.$, S = this.app.settings, P = this.player;
     const eng = new AudioEngine(), pt = new PitchTracker(S);
     let an = null;
@@ -383,11 +383,13 @@ export class AlongView {
     try { await eng.startMic({ deviceId: S.deviceId, record: false }); } catch (err) { alert(L(`麦克风错误：${err.message}`, `Microphone error: ${err.message}`)); return; }
     an = new FrameAnalyzer(eng.sampleRate);
     this.eng = eng;
+    this.controls();
     this.lag = (eng.ctx.outputLatency || 0) + 0.03;
     let lastState = -1;
     this.vIv = setInterval(() => {
       const state = P.getPlayerState?.();
       if (state !== lastState) { ds.length = 0; lastState = state; }
+      if (state === 0 && this.eng === eng) { this.stop(); return; }
       if (state !== 1) return;
       ds.push(P.getCurrentTime() - eng.now());
       if (ds.length > 15) ds.shift();
@@ -395,21 +397,123 @@ export class AlongView {
       this.startMic = -sorted[sorted.length >> 1]; // song time = microphone time − startMic
     }, 100);
     try { P.seekTo(0, true); P.setPlaybackRate(1); P.playVideo(); } catch { /* the singer can press play */ }
-    $('alGo').textContent = L('■ 停止', '■ Stop'); $('alGo').classList.add('recording');
-    $('alStatus').textContent = L('正在跟唱…（已预先分析：原唱的音提前显示）', 'Singing along… (analysed ahead: the original’s notes show in advance)');
-    this.showHeadsetTip(eng);
-    this.liveRange = null;
+    this.singing(eng);
     const tick = () => {
       if (this.eng !== eng) return;
-      if (this.startMic != null) {
-        const now = eng.now() - this.startMic - this.lag;
-        this.draw(now);
-        if (!this.specAt || performance.now() - this.specAt > 100) { this.specAt = performance.now(); this.drawSpectra(now - 0.06); }
-        $('alNow').innerHTML = this.nowHtml(this.refAt(now), this.last?.voiced ? this.last.f0 : 0);
-      }
+      if (this.startMic != null) this.frame(eng.now() - this.startMic - this.lag);
       this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
+  }
+
+  // A song on a player the page can't ask: where it is comes from its sound.
+  // Every 0.5 s the tab's last 4 s — sounding all through, freshly arrived — are
+  // matched against the analysis recording (all of it at first; then ±2 s
+  // around where it should be — repeated choruses can't mix it up); song time
+  // = microphone time + the median of the last 5 offsets. Lost 3 times in a row
+  // (seeked, another song): searched all over again. What's sung before the
+  // song is found is put in place once it is.
+  async startTab() {
+    const $ = this.$, S = this.app.settings, song = this.song;
+    let tab = song.tab;
+    if (!tab || tab.getAudioTracks()[0]?.readyState !== 'live') {
+      try { ({ stream: tab } = await captureTabAudio({ currentTab: song.name === 'Bilibili' })); } catch { this.say(L('要再共享一次放歌的标签页（和它的音频），程序才听得出播到哪里。', 'Share the tab playing the song (with its audio) again, so the app can hear where it is.')); return; }
+      song.tab = tab;
+    }
+    const eng = new AudioEngine(), pt = new PitchTracker(S);
+    let an = null;
+    this.user = []; this.result = null; this.mic = null; this.reviewT = null; $('alRes').innerHTML = '';
+    this.startMic = null;
+    let sounding = 0; // the tab's sound's end, microphone time, when it was last loud
+    // sung while the song isn't found (it takes 4 s of its sound): kept on the
+    // microphone's clock, put in place once it is; what was placed by a lock
+    // that is then lost (a wrong place, a repeated chorus) goes back here too
+    let pending = [], lockTm = Infinity, locked = false; // lockTm: microphone time from which the current lock placed what was sung
+    eng.onFrame = (frame, t) => {
+      if (!an || this.eng !== eng) return;
+      this.keepMic(frame, t, eng.sampleRate);
+      if (t - sounding > 0.5) return;
+      const st = pt.update(an.analyze(frame, { gateDb: S.gateDb, pitchOnly: true }), t);
+      this.last = st;
+      if (!st.voiced) return;
+      if (this.startMic == null || !locked) pending.push({ tm: t, midi: st.midi });
+      else this.user.push({ t: t - this.startMic, midi: st.midi, tm: t });
+    };
+    try { await eng.startMic({ deviceId: S.deviceId, record: false }); } catch (err) { alert(L(`麦克风错误：${err.message}`, `Microphone error: ${err.message}`)); return; }
+    an = new FrameAnalyzer(eng.sampleRate);
+    this.eng = eng;
+    this.controls();
+    const ctx = eng.ctx, src = ctx.createMediaStreamSource(tab), node = new AudioWorkletNode(ctx, 'vocal-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' }), sink = ctx.createGain();
+    sink.gain.value = 0; src.connect(node); node.connect(sink).connect(ctx.destination);
+    const sr = ctx.sampleRate, keepN = Math.ceil(4 * sr / 1024), ring = [];
+    let endT = 0, since = null; // microphone time at the end of the newest block; when the sound began
+    node.port.onmessage = (e) => {
+      if (this.eng !== eng) return;
+      const b = e.data; let p = 0;
+      for (let i = 0; i < b.length; i++) p += b[i] * b[i];
+      endT = eng.now();
+      if (10 * Math.log10(p / b.length + 1e-12) > -55) { sounding = endT; since ??= endT - b.length / sr; } else if (endT - sounding > 0.3) since = null;
+      ring.push(b); if (ring.length > keepN) ring.shift();
+    };
+    this.tabNode = { src, node };
+    this.lag = (ctx.outputLatency || 0) + 0.03;
+    const ds = [];
+    let miss = 0;
+    this.vIv = setInterval(() => {
+      // only stretches of sound all through: a start out of silence would match
+      // any silence-to-sound edge (the song's end, say), not the moment
+      // and only fresh sound: if it stops coming in, the old stretch isn't matched again and again
+      if (this.eng !== eng || ring.length < keepN || since == null || endT - since < 4 || eng.now() - endT > 0.3) return;
+      const x = new Float32Array(ring.length * 1024); ring.forEach((c, i) => x.set(c, i * 1024));
+      const t0 = endT - x.length / sr, live = features(x, sr);
+      const guess = locked && this.startMic != null ? (t0 - this.startMic) * AL_RATE : null;
+      const r = locate(song.align, live, guess != null ? { from: guess - 2 * AL_RATE, to: guess + 2 * AL_RATE } : {});
+      // found anywhere: a clear match (score ≥ 0.4, ahead of any other place by
+      // ≥ 0.1); followed nearby: a weaker one does (live sound matched 0.35–0.5
+      // against the recording with a stand-in, against 0.8–1.0 file to file)
+      if (r && (locked ? r.score >= 0.25 : r.score >= 0.4 && r.margin >= 0.1)) {
+        miss = 0;
+        ds.push(r.at / AL_RATE - t0); if (ds.length > 5) ds.shift();
+        const sorted = [...ds].sort((p, q) => p - q), found = !locked;
+        this.startMic = -sorted[sorted.length >> 1];
+        locked = true;
+        // just found: what was sung while it was being looked for, put in place
+        if (found) {
+          const back = pending.filter((p) => p.tm >= since - 0.5);
+          lockTm = back.length ? back[0].tm : eng.now();
+          this.user.push(...back.map((p) => ({ t: p.tm - this.startMic, midi: p.midi, tm: p.tm })));
+          this.user.sort((p, q) => p.t - q.t);
+          pending = [];
+        }
+      } else if (locked && ++miss >= 3) {
+        // lost: look everywhere again; what this lock placed waits to be placed again
+        locked = false; ds.length = 0;
+        pending = this.user.filter((u) => u.tm >= lockTm).map((u) => ({ tm: u.tm, midi: u.midi })).sort((p, q) => p.tm - q.tm);
+        this.user = this.user.filter((u) => u.tm < lockTm);
+      }
+    }, 500);
+    this.singing(eng);
+    this.say(L('正在跟唱…从头播放那首歌（原速），程序听出播到哪里后就开始记录。', 'Singing along… play the song from the start (normal speed); recording starts once the app hears where it is.'));
+    const tick = () => {
+      if (this.eng !== eng) return;
+      if (this.startMic != null) this.frame(eng.now() - this.startMic - this.lag);
+      this.raf = requestAnimationFrame(tick);
+    };
+    this.raf = requestAnimationFrame(tick);
+  }
+
+  singing(eng) {
+    const $ = this.$;
+    $('alGo').textContent = L('■ 停止', '■ Stop'); $('alGo').classList.add('recording');
+    this.say(L('正在跟唱…', 'Singing along…'));
+    this.showHeadsetTip(eng);
+  }
+
+  // one moment while singing: the chart, the spectra (10 a second), the notes now
+  frame(now) {
+    this.draw(now);
+    if (!this.specAt || performance.now() - this.specAt > 100) { this.specAt = performance.now(); this.drawSpectra(now - 0.06); }
+    this.$('alNow').innerHTML = this.nowHtml(this.refAt(now), this.last?.voiced ? this.last.f0 : 0);
   }
 
   // a Bluetooth headset's own microphone: say so where the headphone tip is
@@ -420,76 +524,37 @@ export class AlongView {
     el.textContent = L('🎧 正在用 AirPods 等蓝牙耳机自带的麦克风：可以跟唱，延迟会自动校准；但耳机会切到通话模式，听到的原唱音质变差。想听得更清楚，可到“设置”里把麦克风改成电脑自带的，耳机只用来听。', '🎧 Using the Bluetooth headset’s own microphone (AirPods and the like): fine for singing along, the delay is lined up automatically; but the headset switches to call mode and the original sounds worse. For better sound, pick the computer’s built-in microphone in Settings and use the headset only to listen.');
   }
 
-  // the tab's sound so far → its melody, from the last 8 s (in the background)
-  async rollingMelody() {
-    const T = this.tab;
-    if (!T || this.melBusy || T.offset == null || !T.chunks.length) return;
-    const per = T.chunks[0].length, need = Math.ceil((8 * T.sr) / per), from = Math.max(0, T.chunks.length - need);
-    const x = new Float32Array((T.chunks.length - from) * per);
-    T.chunks.slice(from).forEach((c, i) => x.set(c, i * per));
-    const a = (from * per) / T.sr, edge = from ? 0.5 : 0; // the window's start, minus a settling edge
-    this.melBusy = true;
-    try {
-      const m = await extractMelody(await resampleTo44k(x, T.sr), this.app.settings.a4);
-      if (this.tab !== T) return;
-      const cut = a + edge + T.offset;
-      const frames = this.song.mel.frames.filter((f) => f.t < cut).concat(m.frames.filter((f) => f.t >= edge).map((f) => ({ t: f.t + a + T.offset, midi: f.midi })));
-      this.song.mel = { frames, notes: notesOf(frames), secs: frames.length ? frames[frames.length - 1].t : 0 };
-    } catch { /* no melody in this stretch (silence, speech) */ } finally { this.melBusy = false; }
-  }
-
   async stop() {
     const $ = this.$, eng = this.eng;
     if (!eng) return;
     this.eng = null;
     cancelAnimationFrame(this.raf);
-    clearInterval(this.melIv);
+    clearInterval(this.vIv);
     try { this.src?.stop?.(); } catch { /* ended */ }
+    try { if (this.song?.yt) this.player?.pauseVideo(); } catch { /* gone */ }
+    try { this.tabNode?.src.disconnect(); this.tabNode?.node.disconnect(); } catch { /* gone */ }
+    this.tabNode = null;
     await eng.stop();
     $('alGo').textContent = L('● 再唱一遍', '● Sing again'); $('alGo').classList.remove('recording');
     $('alNow').innerHTML = this.nowHtml(null, null);
-    clearInterval(this.vIv);
-    if (this.song?.pre) { try { this.player?.pauseVideo(); } catch { /* gone */ } }
-    else if (this.song?.yt) await this.finishYt();
+    this.controls();
     this.finish();
   }
 
-  // YouTube: the whole take's melody, once more, now that all of it is known
-  async finishYt() {
-    const $ = this.$, T = this.tab;
-    try { this.player?.pauseVideo(); } catch { /* gone */ }
-    if (!T) return;
-    this.tab = null;
-    T.stream.getTracks().forEach((t) => t.stop());
-    try { T.src.disconnect(); T.node.disconnect(); } catch { /* ignore */ }
-    if (!T.chunks.length || T.offset == null) return;
-    $('alStatus').textContent = L('正在分析整段原唱…', 'Analysing the whole of the original…');
-    const per = T.chunks[0].length, x = new Float32Array(T.chunks.length * per);
-    T.chunks.forEach((c, i) => x.set(c, i * per));
-    T.chunks = [];
-    this.song.tabAudio = { x, sr: T.sr, offset: T.offset }; // in memory only, for the spectra; never stored
-    $('alGo').disabled = true;
-    try { await this.analyseSong(this.song, await resampleTo44k(x, T.sr), { offset: T.offset }); } catch { /* keep the rolling result */ }
-    $('alGo').disabled = false;
-  }
-
-  // The original's melody, worked out once before singing (YouTube / Bilibili:
-  // once after it, the song only being heard while it plays): Demucs
-  // (along/separate.js) separates the lead vocal, MELODIA follows it — with the
-  // band in the mix MELODIA follows chords and bass much of the time (a
-  // synthetic song: 22 of 176 moments right on the mix, 160 on the vocal).
-  // Then the model is released (≈ 1 GB of GPU / main memory): nothing runs
-  // beside the singing. Skipped or failed: the mix, as before. The progress
-  // line has a fixed height. offset: song time of x[0]. Nothing leaves the device.
-  // → the melody (also set on the song, with song.vox = the vocal)
+  // The analysis itself: Demucs (along/separate.js) separates the lead vocal,
+  // MELODIA follows it — with the band in the mix MELODIA follows chords and
+  // bass much of the time (a synthetic song: 22 of 176 moments right on the mix,
+  // 160 on the vocal). Then the model is released (≈ 1 GB of GPU / main
+  // memory): nothing runs beside the singing. A failure is an error — there's
+  // no half-right fallback. The progress line has a fixed height.
   // rate: x was played that many times faster (pitch kept); scale: song
-  // seconds per second of x (measured; ≈ rate); offset: song time of x[0]
+  // seconds per second of x (measured; ≈ rate); offset: song time of x[0].
+  // → the melody (set on the song with song.vox = the vocal, song.ready)
   async analyseSong(song, x, { offset = 0, rate = 1, scale = rate } = {}) {
-    const box = this.root.querySelector('#alSep'), txt = box.querySelector('.al-sep-t'), fill = box.querySelector('.fill'), skip = box.querySelector('.al-skip');
+    const box = this.root.querySelector('#alSep'), txt = box.querySelector('.al-sep-t'), fill = box.querySelector('.fill');
     const show = (t, p = null, cls = 'busy') => { if (this.song !== song) return; txt.textContent = t; box.className = `al-sep ${cls}`; if (p != null) fill.style.width = `${Math.round(p * 100)}%`; };
     const pct = (p) => `${Math.round(p * 100)}%`;
     let vox = null, why = '';
-    skip.onclick = () => releaseSeparator();
     // the analysis, animated where the pitch chart will be (the same size)
     const scroll = this.root.querySelector('#alScroll'), acv = this.root.querySelector('#alAnim');
     scroll.style.display = 'none'; acv.style.display = '';
@@ -505,17 +570,19 @@ export class AlongView {
           stage === 'load' ? 1 : progress); },
       });
       vox = r.vocals;
-      why = L(`人声已分离（${r.device === 'webgpu' ? 'GPU' : 'CPU'}，${r.secs.toFixed(0)} 秒）`, `vocal separated (${r.device === 'webgpu' ? 'GPU' : 'CPU'}, ${r.secs.toFixed(0)} s)`);
+      why = L(`人声分离用 ${r.device === 'webgpu' ? 'GPU' : 'CPU'} ${r.secs.toFixed(0)} 秒`, `vocal separated on the ${r.device === 'webgpu' ? 'GPU' : 'CPU'} in ${r.secs.toFixed(0)} s`);
     } catch (err) {
-      why = err.message === 'cancelled' ? L('跳过了人声分离', 'vocal separation skipped') : L(`人声分离没成功（${err.message}）`, `vocal separation failed (${err.message})`);
+      why = err.message;
     } finally {
-      releaseSeparator(); // the model leaves memory before the singing
+      await releaseSeparator(); // the model leaves memory before the singing
     }
-    if (this.song !== song) { anim.stop(); return song.mel || { frames: [], notes: [], secs: 0 }; }
-    show(L(`第 3 步：从${vox ? '人声' : '混音'}里提取原唱的旋律…`, `Step 3: extracting the original’s melody from the ${vox ? 'vocal' : 'mix'}…`), 1);
-    anim.update({ stage: 'melody' });
     const back = () => { anim.stop(); if (this.anim === anim) { acv.style.display = 'none'; scroll.style.display = ''; } };
-    const m = await extractMelody(vox || x, this.app.settings.a4, { rate }).catch(() => { back(); throw new Error(L('提取不出旋律', 'no melody could be extracted')); });
+    if (this.song !== song) { anim.stop(); return song.mel; }
+    if (!vox) { back(); show(L(`人声分离失败（${why}）`, `Vocal separation failed (${why})`), null, 'warn'); throw new Error(L(`人声分离失败（${why}）`, `vocal separation failed (${why})`)); }
+    show(L('第 3 步：从人声里提取原唱的旋律…', 'Step 3: extracting the original’s melody from the vocal…'), 1);
+    anim.update({ stage: 'melody' });
+    const m = await extractMelody(vox, this.app.settings.a4, { rate }).catch(() => { back(); throw new Error(L('提取不出旋律', 'no melody could be extracted')); });
+    if (m.notes.length < 3) { back(); show('', null, ''); throw new Error(L('找不到明显的旋律（纯伴奏、打击乐或说话？）', 'no clear melody (backing only, percussion or speech?)')); }
     // MELODIA's times are at the real pace (x seconds × rate) → song time
     const k = scale / rate, frames = m.frames.map((f) => ({ t: offset + k * f.t, midi: f.midi }));
     song.mel = { frames, notes: notesOf(frames), secs: Math.max(song.mel?.secs || 0, offset + scale * (x.length / 44100)) };
@@ -523,21 +590,21 @@ export class AlongView {
     anim.melody(m.frames.length ? notesOf(m.frames.map((f) => ({ t: f.t / rate, midi: f.midi }))) : []);
     await new Promise((r) => setTimeout(r, 1400));
     back();
-    if (vox) song.vox = { x: vox, sr: 44100, offset, scale };
-    show(vox ? L(`✓ ${why}，模型已卸载：原唱的旋律和频谱只看人声，伴奏不干扰`, `✓ ${why}, model unloaded: the original’s melody and spectra use the vocal alone, free of the band`)
-      : L(`${why}：原唱按混音分析（伴奏可能被当成旋律）`, `${why}: the original is analysed from the mix (the band may be taken for the melody)`), null, vox ? 'ok' : 'warn');
+    song.vox = { x: vox, sr: 44100, offset, scale };
+    song.ready = true;
+    show(L(`✓ 分析完成（${why}），模型已卸载`, `✓ Analysed (${why}), model unloaded`), null, 'ok');
     return song.mel;
   }
 
   // the delay lined up, every note compared, the whole song drawn
   finish() {
     const $ = this.$, mel = this.song.mel;
-    if (!mel.notes.length) { $('alStatus').textContent = L('没有找到原唱的旋律：视频的声音没有共享到，或者视频里没有人声旋律。', 'No melody of the original found: the video’s sound wasn’t shared, or it has no vocal melody.'); this.draw(null); return; }
+    if (!mel.notes.length) { this.draw(null); return; }
     if (this.user.length < 20) { $('alStatus').textContent = L('没听到你唱：检查麦克风，戴耳机再试。', 'Didn’t hear you sing: check the microphone and try again on headphones.'); this.draw(null); return; }
-    // analysed ahead from a web player: its clock and the recording's can sit a
-    // fixed few tenths of a second apart (measured 0.25 s with a stand-in), so
-    // the delay is looked for over a wider range
-    const L_ = bestLag(mel.frames, this.user, this.song.pre ? { min: -0.6, max: 1.0 } : {});
+    // a player's sound, not a file: its clock and the recording's can sit a
+    // fixed few tenths of a second apart (0.1–0.25 s with a stand-in), so the
+    // delay is looked for over a wider range
+    const L_ = bestLag(mel.frames, this.user, this.song.yt || this.song.align ? { min: -0.6, max: 1.0 } : {});
     this.lag = L_.lag;
     const user = this.user.map((u) => ({ t: u.t - this.lag, midi: u.midi }));
     const end = user[user.length - 1].t;
@@ -566,19 +633,14 @@ export class AlongView {
     return out;
   }
 
-  // the spectra of the original and the singer at song time t
-  // late: how far behind the live moment this is (from a tab the melody comes 1–2 s late)
-  drawSpectra(t, { late = 0 } = {}) {
+  // the spectra of the original (its separated vocal) and the singer at song time t
+  drawSpectra(t) {
     const cv = this.root.querySelector('#alSpec');
     if (!cv || !this.song || !Number.isFinite(t)) return;
     const N = 4096, song = this.song;
-    // the original: the song file, or the shared tab's sound (kept, or still coming in)
-    let rx = null, rsr = 44100;
-    const V = song.vox, vc = V ? ((t - V.offset) / (V.scale || 1)) * V.sr : -1;
+    let rx = null;
+    const V = song.vox, rsr = 44100, vc = V ? ((t - V.offset) / (V.scale || 1)) * V.sr : -1;
     if (V && vc - N / 2 >= 0 && vc + N / 2 <= V.x.length) rx = V.x.subarray(Math.round(vc - N / 2), Math.round(vc - N / 2) + N);
-    else if (song.x) { rx = song.x.subarray(Math.max(0, Math.round(t * song.sr - N / 2)), Math.round(t * song.sr + N / 2)); rsr = song.sr; }
-    else if (song.tabAudio) { const A = song.tabAudio, c = (t - A.offset) * A.sr; rsr = A.sr; rx = A.x.subarray(Math.max(0, Math.round(c - N / 2)), Math.round(c + N / 2)); }
-    else if (this.tab?.offset != null) { rsr = this.tab.sr; rx = AlongView.windowOf(this.tab.chunks, (t - this.tab.offset) * rsr, N); }
     // the singer: the microphone at the matching moment (the delay lined up)
     let ux = null;
     const M = this.mic;
@@ -590,11 +652,10 @@ export class AlongView {
     const rf = near(song.mel.frames.filter((f) => Math.abs(f.t - t) < 0.12), t, 0.1) || this.refAt(t), uf = near(this.user.filter((u) => Math.abs(u.t - this.lag - t) < 0.08).map((u) => ({ t: u.t - this.lag, midi: u.midi })), t, 0.05);
     const rF0 = rf ? hz(rf.midi) : 0, uF0 = uf ? hz(uf.midi) : 0;
     const rel = pitchRelation(rF0, uF0);
-    // the singer's F1/F2 by LPC; the original's from its melody's harmonics (the band is mixed in)
+    // the singer's F1/F2 by LPC; the original's from its separated vocal's harmonics
     const refS = rx && rx.length === N ? voiceSide(rx, rsr, N / 2, rF0, { N, mixed: true }) : null, user = ux ? voiceSide(ux, M.sr, N / 2, uF0, { N }) : null;
     this.cards?.update({ ref: refS?.f0 ? refS : null, user: user?.f0 ? user : null });
-    const lateTxt = late > 0.3 ? L(`（原唱的旋律要晚一点才算得出来：这是 ${late.toFixed(1)} 秒前）`, ` (the original’s melody is worked out a little late: this is ${late.toFixed(1)} s ago)`) : '';
-    drawSpectraPair(cv, { refLabel: V && rx && rx.buffer === V.x.buffer ? L('原唱人声', 'Orig. vocal') : L('原唱', 'Original'), ref: refS, user, say: this.relationText(rel, rF0, uF0, t) + lateTxt, say2: this.ringText(refS, user) });
+    drawSpectraPair(cv, { refLabel: L('原唱人声', 'Orig. vocal'), ref: refS, user, say: this.relationText(rel, rF0, uF0, t), say2: this.ringText(refS, user) });
   }
 
   // the ring (2–4 kHz below the lows) and the vowel, original against singer
@@ -647,8 +708,6 @@ export class AlongView {
     const ms = notes.map((n) => n.midi).sort((a, b) => a - b), P = VOICE_TYPES[this.app.settings.voiceType];
     const q = (p) => ms[Math.round(p * (ms.length - 1))];
     let range = ms.length ? [Math.floor(q(0.05)) - 3, Math.ceil(q(0.95)) + 3] : [P.low - 3, P.high + 3];
-    // YouTube: the notes arrive while singing — the range only ever widens
-    if (this.song?.yt && this.eng) { const r = this.liveRange || [P.low - 3, P.high + 3]; range = this.liveRange = [Math.min(r[0], range[0]), Math.max(r[1], range[1])]; }
     // each moment of the singer's line against the original's note there (octave aside)
     const statusOf = res ? (t) => res.R.notes.find((n) => t >= n.t0 && t <= n.t1)?.status : (t, midi) => {
       const r = this.refAt(t);

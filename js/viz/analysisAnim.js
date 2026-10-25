@@ -35,11 +35,15 @@ export class AnalysisAnim {
     this.bytes = 0; this.bytesTotal = 0; this.stageAt = { prepare: performance.now() };
   }
 
-  // a song being recorded: secs (of the recording) expected, played `scale`× fast
+  // a song being recorded: secs (of the recording) expected — null when the
+  // length isn't known (a player the page can't ask): the axis then grows with
+  // it — played `scale`× fast
   capturing(secs, scale = 1) {
     this.reset();
     this.capture = true; this.scale = scale; this.stage = 'capture'; this.stageAt.capture = performance.now();
-    this.secs = secs; this.bin = 480; this.mix = new Float32Array(Math.ceil(secs * 100) + 1); this.norm = 4; this.got = 0; this.fed = 0;
+    this.open = !secs; this.secs = secs || 60;
+    const room = this.open ? 20 * 60 : secs; // seconds of room
+    this.bin = 480; this.mix = new Float32Array(Math.ceil(room * 100) + 1); this.norm = 4; this.got = 0; this.fed = 0;
     this.vox = new Float32Array(this.mix.length); this.band = new Float32Array(this.mix.length); this.filled = new Uint8Array(this.mix.length);
   }
 
@@ -54,6 +58,7 @@ export class AnalysisAnim {
       if (a * this.norm > 1) this.norm = 1 / a;
     }
     this.fed += block.length; this.got = this.fed / sr;
+    if (this.open) this.secs = Math.max(60, this.got + 20);
   }
 
   // the song (mono samples): its waveform as peaks per 10 ms
@@ -91,7 +96,9 @@ export class AnalysisAnim {
 
   start() {
     cancelAnimationFrame(this.raf);
-    const tick = () => { this.draw(); this.raf = requestAnimationFrame(tick); };
+    // 30 frames a second, and no canvas shadows: the GPU is Demucs's meanwhile
+    let last = 0;
+    const tick = (t) => { if (t - last >= 32) { last = t; this.draw(); } this.raf = requestAnimationFrame(tick); };
     this.raf = requestAnimationFrame(tick);
   }
   stop() { cancelAnimationFrame(this.raf); this.raf = 0; }
@@ -155,8 +162,8 @@ export class AnalysisAnim {
   drawSteps(ctx, w, now) {
     const order = [...(this.capture ? ['capture'] : []), 'prepare', 'separate', 'melody'], cur = this.stage === 'download' || this.stage === 'load' ? 'prepare' : this.stage === 'done' ? 'end' : this.stage;
     const N = order.length, idx = cur === 'end' ? N : order.indexOf(cur);
-    const names = [...(this.capture ? [L(`${this.scale} 倍速录下原曲`, `Record at ${this.scale}×`)] : []), L('载入分离模型', 'Load the model'), L('分离人声与伴奏', 'Separate vocal / band'), L('提取原唱旋律', 'Extract the melody')];
-    const subs = [...(this.capture ? [`${fmt(this.got * this.scale)} / ${fmt(this.secs * this.scale)}`] : []),
+    const names = [...(this.capture ? [this.scale === 1 ? L('录下原曲', 'Record the song') : L(`${this.scale} 倍速录下原曲`, `Record at ${this.scale}×`)] : []), L('载入分离模型', 'Load the model'), L('分离人声与伴奏', 'Separate vocal / band'), L('提取原唱旋律', 'Extract the melody')];
+    const subs = [...(this.capture ? [this.open ? `${fmt(this.got)}` : `${fmt(this.got * this.scale)} / ${fmt(this.secs * this.scale)}`] : []),
       this.stage === 'download' && this.bytesTotal ? `${(this.bytes / 1e6).toFixed(0)} / ${(this.bytesTotal / 1e6).toFixed(0)} MB` : 'Demucs v4 · htdemucs',
       this.device ? `${this.device === 'webgpu' ? 'WebGPU' : 'CPU'} · ${this.done}/${this.total} ${L('段', 'parts')}` : `${this.total} × 7.8 s`,
       'MELODIA · Essentia.js',
@@ -169,7 +176,7 @@ export class AnalysisAnim {
       ctx.lineWidth = active ? 1.6 : 1; ctx.beginPath(); ctx.roundRect(x, y, pw, 40, 8); ctx.fill(); ctx.stroke();
       // the step's own progress along its bottom edge
       const step = order[i];
-      const p = done ? 1 : active ? (step === 'capture' ? Math.min(1, this.got / this.secs) : step === 'prepare' ? (this.stage === 'download' ? this.progress : this.stage === 'load' ? 0.5 + 0.5 * Math.sin(now / 300) ** 2 : 0) : step === 'separate' ? this.progress : (now / 1400) % 1) : 0;
+      const p = done ? 1 : active ? (step === 'capture' ? (this.open ? (now / 1400) % 1 : Math.min(1, this.got / this.secs)) : step === 'prepare' ? (this.stage === 'download' ? this.progress : this.stage === 'load' ? 0.5 + 0.5 * Math.sin(now / 300) ** 2 : 0) : step === 'separate' ? this.progress : (now / 1400) % 1) : 0;
       if (p > 0) { ctx.fillStyle = done ? '#6fdc6f' : VOX; ctx.fillRect(x + 8, y + 36, (pw - 16) * p, 2); }
       ctx.fillStyle = done ? '#6fdc6f' : active ? VOX : THEME.muted; ctx.beginPath(); ctx.arc(x + 18, y + 20, 9, 0, 2 * Math.PI); ctx.fill();
       ctx.fillStyle = '#0c0f16'; ctx.font = `bold 11px ${SANS}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(done ? '✓' : String(i + 1), x + 18, y + 20.5);
@@ -179,7 +186,7 @@ export class AnalysisAnim {
     // time taken, left, speed
     const el = (now - this.t0) / 1000;
     let right = L(`已用 ${el.toFixed(0)} 秒`, `${el.toFixed(0)} s so far`);
-    if (this.stage === 'capture') right += L(` · 录音还剩约 ${Math.max(0, Math.ceil(this.secs - this.got))} 秒`, ` · about ${Math.max(0, Math.ceil(this.secs - this.got))} s of recording left`);
+    if (this.stage === 'capture' && !this.open) right += L(` · 录音还剩约 ${Math.max(0, Math.ceil(this.secs - this.got))} 秒`, ` · about ${Math.max(0, Math.ceil(this.secs - this.got))} s of recording left`);
     if (this.stage === 'separate' && this.done > 0) {
       const per = this.segT.reduce((a, b) => a + b, 0) / this.segT.length / 1000, left = per * (this.total - this.done);
       right += L(` · 还剩约 ${Math.ceil(left)} 秒 · ${(STRIDE / per).toFixed(1)}× 实时`, ` · about ${Math.ceil(left)} s left · ${(STRIDE / per).toFixed(1)}× realtime`);
@@ -190,8 +197,10 @@ export class AnalysisAnim {
   // recording: a red head where the sound is coming in
   drawRec(ctx, x, ln, now) {
     const a = 0.6 + 0.4 * Math.sin(now / 180);
-    ctx.strokeStyle = `rgba(239,90,90,${a})`; ctx.lineWidth = 2; ctx.shadowColor = '#ef5a5a'; ctx.shadowBlur = 10;
-    ctx.beginPath(); ctx.moveTo(x, ln.y - ln.hh - 10); ctx.lineTo(x, ln.y + ln.hh + 10); ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.strokeStyle = `rgba(239,90,90,${0.3 * a})`; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.moveTo(x, ln.y - ln.hh - 10); ctx.lineTo(x, ln.y + ln.hh + 10); ctx.stroke();
+    ctx.strokeStyle = `rgba(239,90,90,${a})`; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x, ln.y - ln.hh - 10); ctx.lineTo(x, ln.y + ln.hh + 10); ctx.stroke();
     ctx.fillStyle = `rgba(239,90,90,${a})`; ctx.beginPath(); ctx.arc(x + 10, ln.y - ln.hh - 6, 4, 0, 2 * Math.PI); ctx.fill();
     ctx.font = `bold 10.5px ${MONO}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText('REC', x + 17, ln.y - ln.hh - 6);
   }
@@ -201,8 +210,10 @@ export class AnalysisAnim {
     const g = ctx.createLinearGradient(bx - 18, 0, bx + 2, 0);
     g.addColorStop(0, 'rgba(91,156,240,0)'); g.addColorStop(1, 'rgba(150,200,255,0.55)');
     ctx.fillStyle = g; ctx.fillRect(bx - 18, 78, 20, h - 104);
-    ctx.strokeStyle = 'rgba(200,225,255,0.95)'; ctx.lineWidth = 1.5; ctx.shadowColor = VOX; ctx.shadowBlur = 12;
-    ctx.beginPath(); ctx.moveTo(bx, 78); ctx.lineTo(bx, h - 26); ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(91,156,240,0.35)'; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(bx, 78); ctx.lineTo(bx, h - 26); ctx.stroke();
+    ctx.strokeStyle = 'rgba(200,225,255,0.95)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(bx, 78); ctx.lineTo(bx, h - 26); ctx.stroke();
     // particles: as many as the song is loud here; up to the vocal or down to the band
     const loud = Math.min(1, Math.sqrt((this.mix[Math.max(0, Math.min(this.mix.length - 1, j))] || 0) * this.norm));
     const born = Math.random() < 0.35 + 0.6 * loud ? 1 + (loud > 0.5 ? 1 : 0) : 0;
@@ -238,9 +249,11 @@ export class AnalysisAnim {
       const d = Math.max(0, Math.min(1, (el - (n.t0 / this.secs) * 900) / 250));
       if (d <= 0) continue;
       const y = bot - ((n.midi - lo) / span) * (bot - top) + (1 - d) * 10;
-      ctx.globalAlpha = d; ctx.fillStyle = '#f0c75e'; ctx.shadowColor = '#f0b429'; ctx.shadowBlur = 6 * d;
+      ctx.globalAlpha = 0.3 * d; ctx.fillStyle = '#f0b429';
+      ctx.fillRect(X(n.t0) - 1, y - 4, Math.max(2, X(n.t1) - X(n.t0)) + 2, 8);
+      ctx.globalAlpha = d; ctx.fillStyle = '#f0c75e';
       ctx.fillRect(X(n.t0), y - 2, Math.max(2, X(n.t1) - X(n.t0)), 4);
     }
-    ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+    ctx.globalAlpha = 1;
   }
 }

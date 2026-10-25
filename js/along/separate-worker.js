@@ -100,6 +100,10 @@ async function separate(x) {
 }
 
 self.onmessage = async (e) => {
+  // before the worker ends: the session's GPU buffers freed now — a terminated
+  // worker's weren't, and every later separation ran slower (16 s of audio:
+  // 27, 50, 82 s in three runs one after another)
+  if (e.data.release) { try { await proc?.session?.release(); } catch { /* gone */ } proc = null; self.postMessage({ released: true }); return; }
   try {
     await load();
     const t0 = performance.now(), r = await separate(e.data.x);

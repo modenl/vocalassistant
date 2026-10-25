@@ -6,8 +6,8 @@
 
 let worker = null, pending = null;
 
-export function separateVocals(x, { onProgress } = {}) {
-  releaseSeparator(); // one song at a time: a newer one replaces the older
+export async function separateVocals(x, { onProgress } = {}) {
+  await releaseSeparator(); // one song at a time: a newer one replaces the older
   return new Promise((resolve, reject) => {
     pending = reject;
     worker = new Worker(new URL('./separate-worker.js', import.meta.url), { type: 'module' });
@@ -16,7 +16,7 @@ export function separateVocals(x, { onProgress } = {}) {
       const d = e.data;
       if (d.error) done(reject, new Error(d.error));
       else if (d.vocals) done(resolve, d);
-      else onProgress?.(d);
+      else if (!d.released) onProgress?.(d);
     };
     worker.onerror = (e) => { releaseSeparator(); done(reject, new Error(e.message || 'separation failed')); };
     const copy = Float32Array.from(x);
@@ -24,8 +24,17 @@ export function separateVocals(x, { onProgress } = {}) {
   });
 }
 
-// end the worker and with it the model (a job still running is cancelled)
-export function releaseSeparator() {
-  if (worker) { worker.terminate(); worker = null; }
+// end the worker and with it the model, its GPU memory released first (a job
+// still running is cancelled)
+export async function releaseSeparator() {
+  const w = worker;
+  worker = null;
   if (pending) { const r = pending; pending = null; r(new Error('cancelled')); }
+  if (!w) return;
+  await new Promise((res) => {
+    const t = setTimeout(res, 3000);
+    w.onmessage = (e) => { if (e.data?.released) { clearTimeout(t); res(); } };
+    w.postMessage({ release: true });
+  });
+  w.terminate();
 }
